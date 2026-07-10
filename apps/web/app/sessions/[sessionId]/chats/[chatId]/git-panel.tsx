@@ -100,9 +100,6 @@ const mergeMethodDescriptions: Record<MergeMethod, string> = {
   rebase: "All commits will be rebased and added to the base branch.",
 };
 
-const createRepoDisabledReason =
-  "Creating repositories from Open Agents is temporarily disabled. Create the repository on GitHub first, then connect it to a session.";
-
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
 /* ------------------------------------------------------------------ */
@@ -1888,9 +1885,7 @@ export function GitPanel(props: GitPanelProps) {
               size="sm"
               variant="outline"
               className="h-7 text-xs"
-              disabled
               onClick={onCreateRepoClick}
-              title={createRepoDisabledReason}
             >
               <FolderGit2 className="mr-1.5 h-3.5 w-3.5" />
               Create Repo
