@@ -18,8 +18,10 @@
   "dependencies": {
     "@ai-sdk/elevenlabs": "^2.0.29",
     "@ai-sdk/react": "catalog:",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@octokit/auth-app": "^8.2.0",
     "@octokit/rest": "^22.0.1",
+    "@open-agents/acp-mcp": "workspace:*",
     "@open-agents/agent": "workspace:*",
     "@open-agents/sandbox": "workspace:*",
     "@open-agents/shared": "workspace:*",
