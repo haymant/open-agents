@@ -1,15 +1,62 @@
 ---
-title: "ACP-MCP Bridge"
+title: "Headless Agent — ACP-MCP Bridge"
 feature_id: "acp-mcp"
 artifact: "testing-plan"
 status: "draft"
-version: "1"
+version: "2"
 owner_agent: "QA"
 parent_feature: "acp-mcp"
-last_updated: "2026-07-10"
+last_updated: "2026-07-11"
 ---
 
-# ACP-MCP Bridge — Testing Plan
+# Headless Agent — Testing Plan
+
+## 1. Overview
+
+Three test layers:
+- **Unit tests**: Per-module handler tests with mock stores
+- **SIT (local)**: curl-based against `next dev`, 25 existing + 2 new scenarios
+- **SIT (deployed)**: Same curl tests against Vercel deployment
+
+## 2. New SIT Scenarios
+
+### SIT-11: New Repo from Scratch
+
+```
+Goal: Create session, prompt LLM to create README, create repo, commit/push.
+
+1. acp_initialize
+2. acp_session_new                                    → sessionId
+3. acp_session_prompt(sessionId, "create README.md with only the word 'Headless'")
+                                                       → LLM creates via tool call
+4. acp_fs_read_text_file(sessionId, "/vercel/sandbox/README.md")
+                                                       → verify "Headless"
+5. acp_github_create_repo(sessionId, "acp-mcp-test-repo")
+                                                       → returns cloneUrl
+6. acp_github_commit_push(sessionId, "chore: initial README")
+                                                       → { pushed: true, sha }
+7. Manual: repo exists on github.com/${user}/acp-mcp-test-repo with README.md
+8. acp_session_delete(sessionId)
+```
+
+### SIT-12: Existing Repo
+
+```
+Goal: Create session linked to existing repo, prompt LLM, commit or PR.
+
+1. acp_initialize
+2. acp_session_new({ repoUrl: "https://github.com/${user}/existing", branch: "main" })
+3. acp_workflow_provision(sessionId)  → runId
+4. acp_workflow_wait(runId)           → "ready"
+5. acp_session_prompt(sessionId, "add 'Tested by ACP' to end of README.md")
+6a. acp_github_commit_push(sessionId, "test: ACP bridge verification")
+6b. OR acp_github_create_pr(sessionId, "ACP bridge update")
+7. acp_session_delete(sessionId)
+```
+
+## 3. Workflow Correction
+
+Vercel WDK supports local development natively via **Local World** — `start(workflow, args)` runs workflows in-process with virtualized retry/sleep/state. No cloud infrastructure needed. `acp_workflow_provision` works in `next dev` with local WDK.
 
 ## 1. Test Strategy
 

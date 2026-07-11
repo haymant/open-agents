@@ -8,6 +8,7 @@ import {
 } from "ai";
 import type { AnthropicLanguageModelOptions } from "@ai-sdk/anthropic";
 import type { OpenAIResponsesProviderOptions } from "@ai-sdk/openai";
+import { createDeepSeek } from "@ai-sdk/deepseek";
 
 function supportsAdaptiveAnthropicThinking(modelId: string): boolean {
   return modelId.includes("4.6") || modelId.includes("4.7");
@@ -180,15 +181,26 @@ export function gateway(
     "x-title": appName ?? "Open Agents",
   };
 
-  const baseGateway = config
-    ? createGateway({
-        baseURL: config.baseURL,
-        apiKey: config.apiKey,
-        headers: attributionHeaders,
-      })
-    : createGateway({ headers: attributionHeaders });
+  let model: LanguageModel;
 
-  let model: LanguageModel = baseGateway(modelId);
+  // Use @ai-sdk/deepseek provider for DeepSeek models (required for proper tool calling)
+  if (config && isDeepSeekModel(modelId)) {
+    const provider = createDeepSeek({
+      baseURL: config.baseURL,
+      apiKey: config.apiKey,
+      headers: attributionHeaders,
+    });
+    model = provider.chat(normalizeDeepSeekModelId(modelId));
+  } else {
+    const baseGateway = config
+      ? createGateway({
+          baseURL: config.baseURL,
+          apiKey: config.apiKey,
+          headers: attributionHeaders,
+        })
+      : createGateway({ headers: attributionHeaders });
+    model = baseGateway(modelId);
+  }
 
   const providerOptions = getProviderOptionsForModel(
     modelId,
@@ -205,4 +217,20 @@ export function gateway(
   }
 
   return model;
+}
+
+// ── DeepSeek helpers ────────────────────────────────────
+
+function isDeepSeekModel(modelId: string): boolean {
+  return (
+    modelId === "deepseek-chat" ||
+    modelId === "deepseek-reasoner" ||
+    modelId.startsWith("deepseek-") ||
+    modelId.includes("deepseek/")
+  );
+}
+
+function normalizeDeepSeekModelId(modelId: string): string {
+  if (!modelId.includes("/")) return modelId;
+  return modelId.split("/").at(-1) ?? modelId;
 }

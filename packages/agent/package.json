@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "catalog:",
+    "@ai-sdk/deepseek": "^3.0.7",
     "@ai-sdk/openai": "catalog:",
     "@open-agents/sandbox": "workspace:*",
     "ai": "catalog:",

@@ -5,11 +5,12 @@ import { createHandlers, type SessionStore, type SandboxOps } from "./bridge";
 
 let mockCreateCounter = 0;
 const mockStore: SessionStore = {
-  create: mock(async () => {
+  create: mock(async (params: { cwd?: string }) => {
     mockCreateCounter++;
     return {
       sessionId: `test-session-${mockCreateCounter}`,
       sandboxName: `acp-test-session-${mockCreateCounter}`,
+      cwd: params.cwd ?? "/vercel/sandbox",
     };
   }),
   get: mock(async (id: string) =>
@@ -34,6 +35,7 @@ const mockSandbox: SandboxOps = {
     stderr: "",
     exitCode: 0,
   })),
+  prompt: mock(async () => "hello world"),
 };
 
 function createTestHandlers() {

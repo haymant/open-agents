@@ -1,0 +1,19 @@
+{
+  "name": "@open-agents/sandbox-coolify",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./sandbox": "./sandbox.ts"
+  },
+  "dependencies": {
+    "@open-agents/sandbox": "workspace:*"
+  },
+  "devDependencies": {
+    "@open-agents/tsconfig": "workspace:*",
+    "@types/bun": "1.3.12",
+    "@types/node": "^22",
+    "typescript": "^5.7.0"
+  }
+}

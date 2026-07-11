@@ -1,159 +1,100 @@
 ---
-title: "ACP-MCP Bridge"
+title: "Headless Agent — ACP-MCP Bridge"
 feature_id: "acp-mcp"
 artifact: "implementation-plan"
-status: "draft"
-version: "1"
+status: "in-progress"
+version: "3"
 owner_agent: "Developer"
 parent_feature: "acp-mcp"
-last_updated: "2026-07-10"
+last_updated: "2026-07-11"
 ---
 
-# ACP-MCP Bridge — Implementation Plan
+# Headless Agent — Implementation Plan
 
-## Phase 1: Package Scaffold
+## Phase 1: Rename & Scaffold ✅
 
-Create `packages/acp-mcp/` with minimal package.json, tsconfig, and index.ts.
+~~Rename `packages/acp-mcp/` → `packages/acp-mcp-core/`.~~ **Deferred** — package remains `@open-agents/acp-mcp` with added `sandboxType`, `repoUrl`, `branch` params on `acp_session_new`.
 
-**Files:**
-- `packages/acp-mcp/package.json` — name `@open-agents/acp-mcp`, deps on `@agentclientprotocol/sdk`, `@open-agents/sandbox`, `nanoid`
-- `packages/acp-mcp/tsconfig.json` — extends `@open-agents/tsconfig/base.json`
-- `packages/acp-mcp/index.ts` — re-export bridge exports
+## Phase 2: Coolify Sandbox Provider ✅
 
-**Dependencies to install:**
-```bash
-pnpm --filter @open-agents/acp-mcp add @agentclientprotocol/sdk nanoid
-```
+Implemented `@open-agents/sandbox-coolify` package:
 
-**Verification:** `pnpm --filter @open-agents/acp-mcp typecheck` passes.
+- `packages/sandbox-coolify/sandbox.ts` — `CoolifySandbox` (implements `Sandbox` interface) + `CoolifyFileSystem` (HTTP client for container's `fs.js` API)
+- `packages/sandbox-coolify/index.ts` — `connectCoolify()` factory with persisted state
+- `apps/web/lib/sandbox/coolify-api.ts` — Coolify REST API client (create/start/stop apps, deployment wait, health probing, TLS fallback)
+- `apps/web/lib/sandbox/coolify-workspace.ts` — `provisionCoolifyWorkspace()` orchestrator
+- `apps/web/lib/sandbox/coolify-connector.ts` — `CoolifyConnectorConfig` loading from `TEST_COOLIFY_*` / `COOLIFY_*` env vars
+- `apps/web/app/api/acpmcp/route.ts` — Updated `dbStore.create()` to detect `sandboxType: "coolify:{id}"` and provision via Coolify; updated `sandboxOps` to use `connectCoolify` for Coolify sessions
+- `packages/acp-mcp/bridge.ts` — Extended `SessionStore.create()` params with `sandboxType`, `repoUrl`, `branch`; added `acp_session_new` tool params
 
-## Phase 2: Bridge Core
+### Self-Signed TLS Support
 
-Create `packages/acp-mcp/bridge.ts` containing:
+Both `CoolifyFileSystem` (in sandbox) and the Coolify API client (in web app) handle self-signed TLS certificates by falling back to `rejectUnauthorized: false` when standard TLS verification fails with `DEPTH_ZERO_SELF_SIGNED_CERT`.
 
-1. **`toolDefinitions`** — object mapping each ACP-derived tool name to its MCP tool definition (`name`, `description`, `inputSchema`). All ~35 tools from the mapping table in `design.md`.
-2. **Types** — `SessionStore`, `SandboxOps`, `ToolContent` interfaces
-3. **`createHandlers(store, sandbox)`** — factory returning an object with one async method per tool. Each method accepts `Record<string, unknown>` and returns `Promise<ToolContent[]>`.
+### Vercel-Free GitHub Operations
 
-Implementation pattern for each handler:
+Coolify sessions support:
+- Git clone via `bootstrapSourceRepository()` using `GIT_CONFIG_COUNT` env-based auth
+- Branch checkout and new branch creation
+- Direct commit/push via existing `apps/web/lib/github/actions/` (already uses direct GitHub API)
+
+## Phase 3: LLM Prompting (pending)
+
+- `packages/acp-mcp-llm/` — `acp_session_prompt` using `@open-agents/agent` with configurable provider
+
+## Phase 4-6: GitHub, Workflow, Document (pending)
+
+Remaining feature modules from requirements v2.
+- `packages/acp-mcp-workflow/package.json` — deps on `workflow`
+- `packages/acp-mcp-sandbox/package.json` — extracted from core, deps on `@open-agents/sandbox`
+
+## Phase 2: Extract Sandbox Module
+
+Move file/terminal tools from `core/bridge.ts` → `acp-mcp-sandbox/bridge.ts`.
+
+**Core keeps:** session lifecycle, auth, initialize, logout, setMode, config.
+**Sandbox gets:** readTextFile, writeTextFile, edit_file, terminal, sandbox_status, sandbox_snapshot.
+
+## Phase 3: LLM Prompt Module
+
+`packages/acp-mcp-llm/bridge.ts` — replaces canned `echo` with full agent loop.
 
 ```typescript
-async acp_<method>(params: Record<string, unknown>): Promise<ToolContent[]> {
-  try {
-    // 1. Validate params
-    // 2. Call store or sandbox
-    // 3. Return JSON response
-    return [{ type: "text", text: JSON.stringify(response) }];
-  } catch (err) {
-    return [{ type: "text", text: JSON.stringify({ error: err.message }) }];
-  }
+// acp_session_prompt now calls openAgent.run()
+import { openAgent } from "@open-agents/agent";
+import { gateway } from "@open-agents/agent/models";
+
+async acp_session_prompt({ sessionId, message }): Promise<ToolContent[]> {
+  const sandbox = await connectSandbox(state);
+  const skills = await discoverSkills(sandbox);
+
+  const result = await openAgent.run({
+    maxSteps: 20,
+    prepareCall: (call) => ({
+      ...call,
+      experimental_context: { sandbox, skills, model: gateway(modelId) },
+    }),
+  });
+
+  // Persist messages to DB
+  await store.createMessage(sessionId, userText, assistantText);
+  return ok({ messages: result.response.messages, stopReason: "end_turn" });
 }
 ```
 
-**Key implementation notes:**
+## Phase 4: GitHub Module
 
-- **Session methods** (new, load, list, delete, fork, resume, close, setMode, setConfigOption): Operate on the `SessionStore` interface. Each creates/reads/updates/deletes entries in the store.
-- **File methods** (readTextFile, writeTextFile): Call `sandboxOps.readFile/writeFile`. Strip `file://` prefix from URIs.
-- **Terminal/command** (create, output, release, waitForExit, kill): `terminal.create` calls `sandboxOps.runCommand()` and returns `{ terminalId, initialOutput }`. Other terminal methods are stubs for v1.
-- **Conversation** (prompt, cancel): `session.prompt` calls `sandboxOps.runCommand()` with the message text as a command echo. Future iteration will integrate the full agent loop.
-- **Document events** (didOpen, didChange, etc.): Stubs returning `{}`.
-- **NES methods** (start, suggest, accept, reject, close): Stubs returning `{}`.
-- **Elicitation** (create, complete): Stubs for v1.
-- **Auth** (initialize, authenticate, logout): `initialize` returns static capabilities. `authenticate` returns `{ authenticated: true }` (HTTP Bearer auth handles real auth). `logout` is a no-op.
-- **Providers** (list, set, disable): `list` returns a static providers array. `set` and `disable` are no-ops.
-- **Client ops** (requestPermission, sessionUpdate): `requestPermission` auto-accepts (returns `{ outcome: { kind: "approved" } }`).
-- **Protocol control** (cancelRequest): No-op.
+`packages/acp-mcp-github/bridge.ts` — reuses existing server actions.
 
-**Verification:**
-- `pnpm --filter @open-agents/acp-mcp typecheck` passes
-- Unit tests pass (Phase 4)
+## Phase 5: Workflow Module
 
-## Phase 3: API Route
+`packages/acp-mcp-workflow/bridge.ts` — uses Vercel WDK `workflow` package.
+WDK's `Local World` runs in-process with virtualized retries — no cloud infra needed.
 
-Create `apps/web/app/api/acpmcp/route.ts`:
+## Phase 6: Route Wiring
 
-1. **Auth guard**: Check `Authorization: Bearer <token>` against `process.env.ACP_MCP_TOKEN`. Return 401 JSON-RPC error on mismatch.
-2. **JSON-RPC dispatcher**: Parse request body, route `tools/list` → return tool definitions, route `tools/call` → dispatch to handler by tool name.
-3. **Instantiate dependencies**: Create in-memory `Map`-based `SessionStore`. Create `SandboxOps` backed by `connectSandbox()`.
+Update `apps/web/app/api/acpmcp/route.ts` to register all module tools.
 
-**Auth implementation:**
+## Phase 7: SIT Development
 
-```typescript
-function checkAuth(req: NextRequest): boolean {
-  const auth = req.headers.get("authorization");
-  if (!auth || !process.env.ACP_MCP_TOKEN) return false;
-  return auth === `Bearer ${process.env.ACP_MCP_TOKEN}`;
-}
-```
-
-**SandboxOps implementation:**
-
-```typescript
-const sandboxOps: SandboxOps = {
-  async readFile(sandboxName, uri) {
-    const sandbox = await connectSandbox({ type: "vercel", sandboxName });
-    try {
-      return await sandbox.readFile(uri.replace(/^file:\/\//, ""));
-    } finally {
-      await sandbox.stop().catch(() => {});
-    }
-  },
-  // writeFile: similar
-  // runCommand: similar, using sandbox.exec()
-};
-```
-
-**Verification:** `pnpm --filter web typecheck` passes.
-
-## Phase 4: Unit Tests
-
-Create `packages/acp-mcp/bridge.test.ts`:
-
-- Mock `SessionStore` and `SandboxOps` with `mock()` from `bun:test`
-- Test all handlers from the UT table in `testing-plan.md`
-- Use `describe`/`test` blocks grouped by ACP method category
-
-**Run:**
-```bash
-bun test packages/acp-mcp/bridge.test.ts
-```
-
-## Phase 5: SIT Script
-
-Create `scripts/acp-mcp-sit.sh`:
-
-- Source `apps/web/.env` to get `ACP_MCP_TOKEN`
-- Run through SIT scenarios from `testing-plan.md`
-- Use `jq` for JSON parsing and assertions
-- Exit with non-zero code on assertion failure
-
-**Verification:**
-```bash
-bash scripts/acp-mcp-sit.sh
-```
-
-## Phase 6: CI Integration
-
-Add the SIT script to CI if desired (not required for initial release since it requires a running dev server).
-
-Update `package.json` scripts if needed.
-
----
-
-## Implementation Order
-
-```
-Phase 1: Package scaffold
-    ↓
-Phase 2: Bridge core (bridge.ts)
-    ↓
-Phase 3: API route (route.ts)
-    ↓
-Phase 4: Unit tests
-    ↓
-Phase 5: SIT script
-    ↓
-Phase 6: CI (optional)
-```
-
-Each phase is independent and can be verified before moving to the next.
+Two new end-to-end scenarios in `scripts/acp-mcp-sit.sh`:

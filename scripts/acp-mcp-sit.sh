@@ -188,6 +188,44 @@ curl -s --max-time 10 -X POST "$BASE" -H "$ACCEPT" -H "$CT" -H "Authorization: B
   -d "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_delete\",\"arguments\":{\"sessionId\":\"$S5\"}}}" > /dev/null
 
 echo ""
+echo "=== SIT-CF: Coolify Sandbox Tests ==="
+
+# Check if Coolify env vars are configured
+if [ -n "${TEST_COOLIFY_BASE_URL:-}" ] && [ -n "${TEST_COOLIFY_API_KEY:-}" ]; then
+  echo "  Coolify env vars detected. Running Coolify tests..."
+
+  echo "  Step 1: Create Coolify session"
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_new\",\"arguments\":{\"sandboxType\":\"coolify:default\"}}}")
+  CF_SESSION=$(echo "$RESP" | jq -r '.result.content[0].text | fromjson | .sessionId // empty')
+  if [ -n "$CF_SESSION" ]; then
+    ok "Created Coolify session: $CF_SESSION"
+  else
+    fail "Failed to create Coolify session"
+  fi
+
+  if [ -n "$CF_SESSION" ]; then
+    echo "  Step 2: Write file"
+    RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_fs_write_text_file\",\"arguments\":{\"sessionId\":\"$CF_SESSION\",\"uri\":\"/README.md\",\"content\":\"Coolify SIT Test\"}}}")
+    assert_json "write file ok" ".result.content[0].text | fromjson | .success == true" "$RESP"
+
+    echo "  Step 3: Read file"
+    RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_fs_read_text_file\",\"arguments\":{\"sessionId\":\"$CF_SESSION\",\"uri\":\"/README.md\"}}}")
+    assert_json "read file matches" ".result.content[0].text | fromjson | .content == \"Coolify SIT Test\"" "$RESP"
+
+    echo "  Step 4: Run terminal command"
+    RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_terminal_create\",\"arguments\":{\"sessionId\":\"$CF_SESSION\",\"command\":\"echo hello-coolify\"}}}")
+    assert_json "terminal command succeeds" ".result.content[0].text | fromjson | .exitCode == 0" "$RESP"
+
+    echo "  Step 5: Cleanup — delete Coolify session"
+    RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_delete\",\"arguments\":{\"sessionId\":\"$CF_SESSION\"}}}")
+    assert_json "delete returns ok" ".result.content[0].text != null" "$RESP"
+  fi
+else
+  echo "  ⚠️  TEST_COOLIFY_BASE_URL and TEST_COOLIFY_API_KEY not set — skipping Coolify SIT tests"
+  echo "  Set these env vars to run Coolify integration tests."
+fi
+
+echo ""
 echo "═══════════════════════════════════════════"
 echo "  Results: $PASS passed, $FAIL failed"
 echo "═══════════════════════════════════════════"

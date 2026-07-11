@@ -6,13 +6,17 @@ export interface SessionRecord {
   sandboxName: string;
   cwd: string;
   mode?: string;
+  sandboxType?: string;
   configOptions?: Record<string, unknown>;
 }
 
 export interface SessionStore {
   create(params: {
     cwd?: string;
-  }): Promise<{ sessionId: string; sandboxName: string }>;
+    sandboxType?: string;
+    repoUrl?: string;
+    branch?: string;
+  }): Promise<{ sessionId: string; sandboxName: string; cwd: string }>;
   get(sessionId: string): Promise<SessionRecord | undefined>;
   list(): Promise<Array<{ sessionId: string }>>;
   delete(sessionId: string): Promise<void>;
@@ -40,6 +44,8 @@ export interface SandboxOps {
     args?: string[],
     cwd?: string,
   ): Promise<ExecResult>;
+  /** Send a prompt to the LLM agent. Returns the assistant's text response. */
+  prompt?(sessionId: string, userText: string, cwd: string): Promise<string>;
 }
 
 // ── Tool definitions (JSON Schema for MCP) ────────────────────────
@@ -128,7 +134,14 @@ export const toolDefinitions: Record<
     description: "Create a new session backed by a sandbox workspace.",
     inputSchema: {
       type: "object",
-      properties: { cwd: stringProp("Working directory") },
+      properties: {
+        cwd: stringProp("Working directory"),
+        sandboxType: stringProp(
+          'Sandbox type: "vercel" (default) or "coolify:{connectorId}"',
+        ),
+        repoUrl: stringProp("GitHub repository URL to clone"),
+        branch: stringProp("Branch to checkout"),
+      },
     },
   },
   acp_session_load: {
@@ -547,10 +560,13 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
     ): Promise<ToolContent[]> {
       const result = await store.create({
         cwd: (params.cwd as string) ?? "/vercel/sandbox",
+        sandboxType: params.sandboxType as string | undefined,
+        repoUrl: params.repoUrl as string | undefined,
+        branch: params.branch as string | undefined,
       });
       return ok({
         sessionId: result.sessionId,
-        cwd: (params.cwd as string) ?? "/vercel/sandbox",
+        cwd: result.cwd,
         availableModes: [{ id: "code", label: "Code" }],
       });
     },
@@ -587,7 +603,10 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
       const sourceId = params.sessionId as string;
       const source = await store.get(sourceId);
       if (!source) return err("Source session not found");
-      const result = await store.create({ cwd: source.cwd });
+      const result = await store.create({
+        cwd: source.cwd,
+        sandboxType: source.sandboxType,
+      });
       return ok({ sessionId: result.sessionId, cwd: source.cwd });
     },
 
@@ -639,17 +658,17 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
       const text = (content?.[0]?.text as string) ?? "";
 
       let assistantText: string;
-      try {
-        const result = await sandbox.runCommand(
-          record.sandboxName,
-          "echo",
-          [text],
-          record.cwd,
-        );
-        assistantText = result.stdout || result.stderr || `Echoed: ${text}`;
-      } catch {
-        // Sandbox not available (e.g. local dev) — return a canned response
-        assistantText = `Received: "${text}". (Sandbox not available — response is simulated.)`;
+
+      // Use LLM agent if available, otherwise fall back to echo
+      if (sandbox.prompt) {
+        try {
+          assistantText = await sandbox.prompt(sessionId, text, record.cwd);
+        } catch (error) {
+          assistantText = `LLM error: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      } else {
+        // Echo fallback for unit tests / no LLM configured
+        assistantText = `Echo: ${text}`;
       }
 
       // Persist the message pair if the store supports it

@@ -69,6 +69,9 @@ importers:
       '@open-agents/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
+      '@open-agents/sandbox-coolify':
+        specifier: workspace:*
+        version: link:../../packages/sandbox-coolify
       '@open-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -263,6 +266,9 @@ importers:
       '@ai-sdk/anthropic':
         specifier: 'catalog:'
         version: 3.0.92(zod@4.4.3)
+      '@ai-sdk/deepseek':
+        specifier: ^3.0.7
+        version: 3.0.7(zod@4.4.3)
       '@ai-sdk/openai':
         specifier: 'catalog:'
         version: 3.0.80(zod@4.4.3)
@@ -311,6 +317,25 @@ importers:
         specifier: ^22
         version: 22.20.0
 
+  packages/sandbox-coolify:
+    dependencies:
+      '@open-agents/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
+    devDependencies:
+      '@open-agents/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
+      '@types/bun':
+        specifier: 1.3.12
+        version: 1.3.12
+      '@types/node':
+        specifier: ^22
+        version: 22.20.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
   packages/shared:
     dependencies:
       react:
@@ -340,6 +365,12 @@ packages:
   '@ai-sdk/anthropic@3.0.92':
     resolution: {integrity: sha512-dFrf4xhx2yM686KHFm76Nn7nBekjkjiw1btqOyR26/kXz58QMguhNsjyvMqPktD8AW/wwTAq0fDRVyDvF2gH1w==}
     engines: {node: '>=18'}
+    peerDependencies:
+      zod: ^4.3.6
+
+  '@ai-sdk/deepseek@3.0.7':
+    resolution: {integrity: sha512-XtY5eBUUE2fjcm1rprHowPVhh79knuBoiWzd+cI8ANf0hanOxRnHc8JpvC4KWMqoweGz4EOAnC3BR/fyGdAhhw==}
+    engines: {node: '>=22'}
     peerDependencies:
       zod: ^4.3.6
 
@@ -383,6 +414,12 @@ packages:
     peerDependencies:
       zod: ^4.3.6
 
+  '@ai-sdk/provider-utils@5.0.7':
+    resolution: {integrity: sha512-OSm5/5kdrHa11WIOo5LYgDKnxYWp5aB/wx5EXRHi0jpUGduMDeB6oht9U6p+UNNWIP3F/EqPpV8d7vdP/iRnqg==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      zod: ^4.3.6
+
   '@ai-sdk/provider@3.0.13':
     resolution: {integrity: sha512-ZPtVYt5QIJzOta1kdUiDuCx4HhFkvNPv/rvmZ2b1iXwybYjJsCnNYR4PAw4kW7rgVfDARvHXcU64efWuqNp6bw==}
     engines: {node: '>=18'}
@@ -390,6 +427,10 @@ packages:
   '@ai-sdk/provider@3.0.8':
     resolution: {integrity: sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ==}
     engines: {node: '>=18'}
+
+  '@ai-sdk/provider@4.0.3':
+    resolution: {integrity: sha512-e0CpNWJUY7OxAFAnCZkw+ri9QOHWwTs1tXP42782KFGCU07qt8NiXCrCVowyCB5dP2r5/Uls+g2oPd8kOJn9dw==}
+    engines: {node: '>=22'}
 
   '@ai-sdk/react@3.0.221':
     resolution: {integrity: sha512-5Zd+rF0YbjOqre0NEzdNE+FvNPrEuqfHm4KGxw9ovbAHv0ut/7sgYIn2kzr6ekvXHNqWz0HEmi+zYOXOZCJxJw==}
@@ -2863,6 +2904,9 @@ packages:
 
   '@workflow/rollup@5.0.0-beta.26':
     resolution: {integrity: sha512-dZVBEyH0ej6A8ugBebO8KT11kgxk7abak6R+GGAyJLqA0G0hEVtvGWkn4Fn9vI916MQpCiQdi5jKR7ySwcnaVw==}
+
+  '@workflow/serde@4.1.0':
+    resolution: {integrity: sha512-pav4F2BoirECWR7Nf1TKt+2eETcBj7jj4cBefQ8VXQCA6NPkaKeLfj/zMgi+3zYV5ZIBT4GuUiphsj0/b9hPQQ==}
 
   '@workflow/serde@5.0.0-beta.2':
     resolution: {integrity: sha512-INB+FcEKQkkFZa+s53sEMTNRFiBa2g9vzjsNuEDagvWxtI0t/cnCyoc57i7kS7nj+3/vGeRjO4Yn5ccbT0hyBQ==}
@@ -5638,6 +5682,12 @@ snapshots:
       '@ai-sdk/provider-utils': 4.0.35(zod@4.4.3)
       zod: 4.4.3
 
+  '@ai-sdk/deepseek@3.0.7(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.3
+      '@ai-sdk/provider-utils': 5.0.7(zod@4.4.3)
+      zod: 4.4.3
+
   '@ai-sdk/devtools@0.0.15':
     dependencies:
       '@ai-sdk/provider': 3.0.8
@@ -5684,11 +5734,23 @@ snapshots:
       eventsource-parser: 3.1.0
       zod: 4.4.3
 
+  '@ai-sdk/provider-utils@5.0.7(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.3
+      '@standard-schema/spec': 1.1.0
+      '@workflow/serde': 4.1.0
+      eventsource-parser: 3.1.0
+      zod: 4.4.3
+
   '@ai-sdk/provider@3.0.13':
     dependencies:
       json-schema: 0.4.0
 
   '@ai-sdk/provider@3.0.8':
+    dependencies:
+      json-schema: 0.4.0
+
+  '@ai-sdk/provider@4.0.3':
     dependencies:
       json-schema: 0.4.0
 
@@ -7898,6 +7960,8 @@ snapshots:
       - '@swc/helpers'
       - supports-color
       - ws
+
+  '@workflow/serde@4.1.0': {}
 
   '@workflow/serde@5.0.0-beta.2': {}
 

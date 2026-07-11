@@ -1,28 +1,254 @@
 ---
-title: "ACP-MCP Bridge"
+title: "Headless Agent — ACP-MCP Bridge"
 feature_id: "acp-mcp"
 artifact: "design"
 status: "draft"
-version: "1"
+version: "2"
 owner_agent: "Architect"
 parent_feature: "acp-mcp"
-last_updated: "2026-07-10"
+last_updated: "2026-07-11"
 ---
 
-# ACP-MCP Bridge — Design
+# Headless Agent — Design
 
 ## 1. Design Summary
 
-A bridge that exposes Open Agents' infrastructure through MCP tools that map to Agent Client Protocol (ACP) methods. Sessions are backed by the real database (same `sessions` and `chats` tables used by the chat UI), so sessions created via MCP are immediately visible in the UI. The bridge lives in two locations:
+The headless agent is split into **six composable modules**, each in `packages/acp-mcp-{module}/`. One API route (`apps/web/app/api/acpmcp/route.ts`) combines them all. Each module is a standalone MCP tool group that can be enabled/disabled independently.
 
-- **`packages/acp-mcp/`** — reusable bridge logic (tool definitions, handler factory, types)
-- **`apps/web/app/api/acpmcp/route.ts`** — Next.js API route that wires the bridge into the deployment, importing DB helpers from the existing `@/lib/db/sessions` module
-
-No existing files are modified. The bridge authenticates via a static Bearer token (`ACP_MCP_TOKEN`) independent of the app's OAuth system.
-
-## 2. Components & Interfaces
+### Module Map
 
 ```
+packages/
+  acp-mcp-core/          Session, auth, config
+  acp-mcp-llm/           LLM providers + prompt execution
+  acp-mcp-sandbox/        File ops + shell (rename from acp-mcp)
+  acp-mcp-github/         Repo, commit, PR
+  acp-mcp-workflow/       Durable workflow (WDK Local World)
+  acp-mcp-document/       Document events, NES, permissions
+
+All modules share:
+  - Bridge types (SessionStore, SandboxOps) from acp-mcp-sandbox
+  - Tool name prefix convention (acp_*)
+```
+
+## 2. Component Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   MCP Client                                 │
+│  POST /api/acpmcp  { jsonrpc, method, params }              │
+│  Authorization: Bearer <ACP_MCP_TOKEN>                      │
+└────────────────────────┬────────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  apps/web/app/api/acpmcp/route.ts                           │
+│                                                             │
+│  ┌─────┐  ┌──────────────┐  ┌───────────────────────────┐  │
+│  │Auth │→│McpServer      │→│Combined Tool Registry      │  │
+│  │     │  │(MCP SDK)     │  │(all 6 modules registered) │  │
+│  └─────┘  └──────────────┘  └───────────────────────────┘  │
+│                                    │                        │
+└────────────────────────────────────┼────────────────────────┘
+                   ┌─────────────────┼─────────────────┐
+         ┌─────────┤                 │                 ├────────┐
+         ▼         ▼                 ▼                 ▼        ▼
+   ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌────────────┐ ┌──────────┐
+   │acp-mcp-  │ │acp-mcp-  │ │acp-mcp-   │ │acp-mcp-    │ │acp-mcp-  │
+   │core      │ │llm       │ │sandbox    │ │github      │ │workflow  │
+   │          │ │          │ │           │ │             │ │          │
+   │sessions  │ │openAgent │ │connectSan │ │octokit      │ │workflow  │
+   │DB        │ │.run()    │ │dbox()     │ │commit/push  │ │WDK       │
+   └──────────┘ └──────────┘ └────────────┘ └────────────┘ └──────────┘
+                          │
+                          ▼
+                  ┌─────────────────┐
+                  │ Vercel AI       │
+                  │ Gateway         │
+                  │ (OpenAI,        │
+                  │  Anthropic,     │
+                  │  DeepSeek)      │
+                  └─────────────────┘
+```
+
+## 3. Module Designs
+
+### 3.1 `acp-mcp-core` — Session & Auth
+
+`packages/acp-mcp-core/` (rename existing `packages/acp-mcp/`)
+
+**Types:**
+```typescript
+interface SessionStore {
+  create(params): Promise<{ sessionId, sandboxName }>;
+  get(sessionId): Promise<SessionRecord | undefined>;
+  list(): Promise<Array<{ sessionId }>>;
+  delete(sessionId): Promise<void>;
+  update(sessionId, data): Promise<void>;
+}
+```
+
+**Implementation:** Real DB-backed sessions using `createSessionWithInitialChat`, `getSessionsByUserId`, `updateSession`.
+
+**Session creation flow:**
+```
+acp_session_new
+  → createSessionWithInitialChat({ id, userId, title })
+  → connectSandbox({ sandboxName, timeout, vcpus, createIfMissing })
+  → updateSession({ sandboxState, lifecycleState: "active" })
+  → return { sessionId, sandboxName, cwd, availableModes }
+```
+
+### 3.2 `acp-mcp-llm` — LLM Providers & Prompting
+
+`packages/acp-mcp-llm/`
+
+This is the key upgrade — replaces the canned `echo` response with the full agent loop.
+
+**Prompt execution flow:**
+```
+acp_session_prompt({ sessionId, message: { role: "user", content: [...] }})
+  → store.get(sessionId)                                     ← DB read
+  → connectSandbox(sandboxState)                              ← sandbox connect
+  → discoverSkills(sandbox)                                   ← skill loading
+  → resolveChatModelRuntime({ userId, sessionId, requestUrl }) ← model config
+  → openAgent.run({                                           ← FULL AGENT LOOP
+       messages: [{ role: "user", content: userText }],
+       sandbox: { state, workingDirectory, ... },
+       model: selectedModelId,
+       skills,
+     })
+  → persistAssistantMessage(chatId, response)                 ← DB write
+  → return { messages: response.messages, stopReason }
+```
+
+**Dependencies:** `@open-agents/agent` (existing workspace package), `ai` SDK, AI Gateway.
+
+**Configurable providers:**
+```typescript
+acp_providers_set({ provider: "deepseek", model: "deepseek-chat" })
+acp_providers_set({ provider: "anthropic", model: "claude-sonnet-4-20250514" })
+```
+
+### 3.3 `acp-mcp-sandbox` — Workspace & Filesystem
+
+`packages/acp-mcp-sandbox/` (extracted from current bridge.ts)
+
+Currently fully implemented. File read/write/edit, terminal, sandbox state, snapshots. Uses `connectSandbox()` with `createIfMissing: true` for auto-creation.
+
+### 3.4 `acp-mcp-github` — GitHub Integration
+
+`packages/acp-mcp-github/`
+
+Reuses existing `apps/web/lib/github/access.ts`, `apps/web/lib/github/app.ts`, `apps/web/lib/github/commit.ts`, and the GitHub App installation token system.
+
+**Create repo flow:**
+```
+acp_github_create_repo({ sessionId, repoName, isPrivate })
+  → store.get(sessionId) → verify sandbox is active
+  → getUserOctokit(userId) → GitHub API call
+  → octokit.repos.createForAuthenticatedUser({ name, private, auto_init: true })
+  → updateSession({ repoOwner, repoName, cloneUrl, branch })
+  → git remote set-url origin <cloneUrl>
+  → return { repoUrl, cloneUrl, branch }
+```
+
+**Commit & push flow:**
+```
+acp_github_commit_push({ sessionId, message })
+  → store.get(sessionId) → verify repo is linked
+  → mintInstallationToken({ contents: "write" })
+  → syncToRemotePreservingChanges(sandbox, branch)   ← rebase
+  → stageAll(sandbox) → getStagedDiff()
+  → createCommit() via GitHub API                     ← broker-side commit
+  → pushBranchToRemote(sandbox, branch)                 ← sandbox-side push
+  → return { sha, pushed: true }
+```
+
+### 3.5 `acp-mcp-workflow` — Durable Workflow
+
+`packages/acp-mcp-workflow/`
+
+Uses **Vercel WDK** (`workflow` package) which supports:
+- **Local World** (built-in, no infra needed) — for dev and CI
+- **Vercel World** (default on Vercel) — serverless queues
+- **Custom World** (Postgres, Redis) — for self-hosted
+
+**Correction from v1:** The WDK does support local dev natively. `start(workflow, args)` uses the Local World which runs the workflow in-process with virtualized retry/sleep/state. It does NOT require Vercel cloud infrastructure.
+
+**Flow:**
+```
+acp_workflow_provision({ sessionId })
+  → start(sandboxProvisioningWorkflow, [sessionId])
+  → return { runId }
+
+acp_workflow_wait({ runId })
+  → getRun(runId)
+  → await run.returnValue
+  → return { result } or throw on failure
+```
+
+### 3.6 `acp-mcp-document` — Document Events & Permissions
+
+`packages/acp-mcp-document/`
+
+Stubs for NES and document events. Permissions auto-accept.
+
+## 4. API Route Wiring
+
+`apps/web/app/api/acpmcp/route.ts` combines all modules:
+
+```typescript
+// Create McpServer
+const mcpServer = new McpServer({ name, version }, { capabilities: { tools: {} } });
+
+// Register all module tools
+registerCoreTools(mcpServer, dbStore, sandboxOps);
+registerLLMTools(mcpServer, dbStore, sandboxOps);
+registerSandboxTools(mcpServer, dbStore, sandboxOps);
+registerGitHubTools(mcpServer, dbStore, sandboxOps);
+registerWorkflowTools(mcpServer, dbStore);
+registerDocumentTools(mcpServer, dbStore);
+
+// Per-request transport
+const transport = new WebStandardStreamableHTTPServerTransport({
+  sessionIdGenerator: undefined,
+  enableJsonResponse: true,
+});
+```
+
+## 5. SIT Strategy
+
+Two end-to-end workflows in `scripts/acp-mcp-sit.sh`:
+
+**SIT-11 (New Repo from Scratch):**
+```
+acp_initialize
+→ acp_session_new
+→ acp_session_prompt("create README.md")
+→ acp_github_create_repo("acp-mcp-test-repo")
+→ acp_github_commit_push("initial README")
+→ verify: repo exists on GitHub with README.md
+→ acp_session_delete
+```
+
+**SIT-12 (Existing Repo):**
+```
+acp_initialize
+→ acp_session_new({ repoUrl, branch })
+→ acp_session_prompt("add feature X")
+→ acp_github_commit_push or acp_github_create_pr
+→ acp_session_delete
+```
+
+## 6. Failure Modes
+
+| Failure | Handling |
+|---|---|
+| Sandbox API unavailable (local dev) | Provision falls back to initial state; file/terminal ops auto-create sandbox on first use |
+| LLM provider not configured | `acp_providers_set` returns available providers from AI Gateway |
+| GitHub token expired | `getUserGitHubToken` returns null → 400 "GitHub not connected" |
+| Workflow run times out | `getRun(runId).returnValue` throws after timeout; caller retries |
+
 ┌─────────────────────────────────────────────────────────┐
 │                    MCP Client                            │
 │  (Claude Desktop, VS Code, Cursor, etc.)                │

@@ -3,7 +3,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { nanoid } from "nanoid";
-import { connectSandbox } from "@open-agents/sandbox";
+import { tool, ToolLoopAgent, stepCountIs } from "ai";
+import { gateway } from "@open-agents/agent";
+import { connectSandbox, type SandboxState } from "@open-agents/sandbox";
+import {
+  connectCoolify,
+  type CoolifyState,
+} from "@open-agents/sandbox-coolify";
 import {
   createHandlers,
   toolDefinitions,
@@ -18,6 +24,10 @@ import {
   createChatMessageIfNotExists,
   getChatsBySessionId,
 } from "@/lib/db/sessions";
+import {
+  provisionCoolifyWorkspace,
+  deprovisionCoolifyWorkspace,
+} from "@/lib/sandbox/coolify-workspace";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -97,6 +107,73 @@ const dbStore: SessionStore = {
 
     const sessionId = nanoid();
     const sandboxName = `sandbox-${sessionId}`;
+    const isCoolify = params.sandboxType?.startsWith("coolify:");
+
+    // ── Coolify path ───────────────────────────────────
+    if (isCoolify) {
+      const connectorId =
+        params.sandboxType!.replace("coolify:", "") || "default";
+
+      const initialSandboxState: CoolifyState = {
+        type: "coolify",
+        connectorConfigId: connectorId,
+        sandboxName,
+        sandboxId: sessionId,
+      };
+
+      await createSessionWithInitialChat({
+        session: {
+          id: sessionId,
+          userId,
+          title: "ACP Bridge Session (Coolify)",
+          status: "running",
+          sandboxState: initialSandboxState as unknown as SandboxState,
+          isNewBranch: false,
+          globalSkillRefs: [],
+        },
+        initialChat: {
+          id: nanoid(),
+          title: "Initial Chat",
+          modelId: "gpt-4o",
+        },
+      });
+
+      // Provision the Coolify workspace
+      let sandboxState: CoolifyState;
+      try {
+        const result = await provisionCoolifyWorkspace({
+          connectorId,
+          sessionId,
+          repoUrl: params.repoUrl,
+          branch: params.branch,
+        });
+        sandboxState = result.state;
+      } catch (error) {
+        console.error("[acpmcp] Coolify provisioning failed:", error);
+        // Keep initial state so the session exists but sandbox is unavailable
+        sandboxState = initialSandboxState;
+      }
+
+      await updateSession(sessionId, {
+        sandboxState: sandboxState as unknown as SandboxState,
+        lifecycleState: "active",
+        lifecycleError: null,
+      });
+
+      // Cache for future sandboxOps calls
+      cacheSandboxState(
+        sandboxState.sandboxName ?? sandboxName,
+        sandboxState as Record<string, unknown>,
+      );
+
+      return {
+        sessionId,
+        sandboxName: sandboxState.sandboxName ?? sandboxName,
+        cwd: "/workspace",
+      };
+    }
+
+    // ── Vercel path (default) ──────────────────────────
     const initialSandboxState = { type: "vercel" as const, sandboxName };
 
     await createSessionWithInitialChat({
@@ -154,20 +231,30 @@ const dbStore: SessionStore = {
       lifecycleError: null,
     });
 
-    return { sessionId, sandboxName: sandboxState.sandboxName };
+    return {
+      sessionId,
+      sandboxName: sandboxState.sandboxName,
+      cwd: "/vercel/sandbox",
+    };
   },
 
   async get(sessionId) {
     const record = await getSessionById(sessionId);
     if (!record) return undefined;
     const sandboxState = record.sandboxState as
-      | { type?: string; sandboxName?: string }
+      | {
+          type?: string;
+          sandboxName?: string;
+          coolifyPreviewUrls?: Record<string, string>;
+        }
       | null
       | undefined;
+    const isCoolify = sandboxState?.type === "coolify";
     return {
       sandboxName: sandboxState?.sandboxName ?? `sandbox-${sessionId}`,
-      cwd: "/vercel/sandbox",
+      cwd: isCoolify ? "/workspace" : "/vercel/sandbox",
       mode: record.branch ?? undefined,
+      sandboxType: sandboxState?.type,
     };
   },
 
@@ -179,6 +266,31 @@ const dbStore: SessionStore = {
   },
 
   async delete(sessionId) {
+    // Deprovision Coolify apps if applicable
+    try {
+      const record = await getSessionById(sessionId);
+      if (record) {
+        const sandboxState = record.sandboxState as
+          | CoolifyState
+          | null
+          | undefined;
+        if (
+          sandboxState?.type === "coolify" &&
+          sandboxState.coolifyApplicationId
+        ) {
+          await deprovisionCoolifyWorkspace(
+            sandboxState.connectorConfigId ?? "default",
+            sandboxState.coolifyApplicationId,
+          );
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[acpmcp] Failed to deprovision Coolify app for session ${sessionId}:`,
+        error,
+      );
+    }
+
     await updateSession(sessionId, { status: "archived" });
   },
 
@@ -193,26 +305,102 @@ const dbStore: SessionStore = {
     const chatId = chats[0]?.id;
     if (!chatId) return;
 
+    // Match WebAgentUIMessage format: parts column stores the full message envelope
     await createChatMessageIfNotExists({
       id: nanoid(),
       chatId,
       role: "user",
-      parts: [{ type: "text", text: userText }],
+      parts: {
+        id: nanoid(),
+        role: "user",
+        parts: [{ type: "text", text: userText }],
+      },
     });
 
     await createChatMessageIfNotExists({
       id: nanoid(),
       chatId,
       role: "assistant",
-      parts: [{ type: "text", text: assistantText }],
+      parts: {
+        id: nanoid(),
+        role: "assistant",
+        parts: [{ type: "text", text: assistantText }],
+      },
     });
   },
 };
 
 // ── Sandbox operations ──────────────────────────────────
+// Maintains a cache of sandboxName → sandbox state for Coolify sessions.
+// This avoids the need to query the DB on every file/exec operation.
+
+const sandboxStateCache = new Map<
+  string,
+  { type: string; state: CoolifyState }
+>();
+
+function cacheSandboxState(
+  sandboxName: string,
+  state: Record<string, unknown>,
+) {
+  const s = state as { type?: string };
+  if (s.type === "coolify") {
+    sandboxStateCache.set(sandboxName, {
+      type: "coolify",
+      state: state as CoolifyState,
+    });
+  }
+}
+
+async function getSandboxForSession(
+  sandboxName: string,
+): Promise<{ type: string; state?: CoolifyState }> {
+  const cached = sandboxStateCache.get(sandboxName);
+  if (cached) return cached;
+
+  // Fallback: try DB lookup for existing sessions
+  try {
+    const { db } = await import("@/lib/db/client");
+    const { sessions } = await import("@/lib/db/schema");
+    const rows = await db
+      .select({ sandboxState: sessions.sandboxState })
+      .from(sessions)
+      .limit(200);
+
+    for (const row of rows) {
+      const state = row.sandboxState as {
+        sandboxName?: string;
+        type?: string;
+      } | null;
+      if (state?.sandboxName === sandboxName) {
+        if (state.type === "coolify") {
+          sandboxStateCache.set(sandboxName, {
+            type: "coolify",
+            state: state as CoolifyState,
+          });
+          return { type: "coolify", state: state as CoolifyState };
+        }
+        return { type: "vercel" };
+      }
+    }
+  } catch {
+    // DB unavailable — fall through
+  }
+
+  return { type: "vercel" };
+}
 
 const sandboxOps: SandboxOps = {
   async readFile(sandboxName: string, uri: string) {
+    const resolved = await getSandboxForSession(sandboxName);
+    if (resolved.type === "coolify" && resolved.state) {
+      const sandbox = await connectCoolify(resolved.state);
+      try {
+        return await sandbox.readFile(uri, "utf-8");
+      } finally {
+        await sandbox.stop().catch(() => {});
+      }
+    }
     const sandbox = await connectSandbox({ type: "vercel", sandboxName });
     try {
       return await sandbox.readFile(uri, "utf-8");
@@ -221,6 +409,16 @@ const sandboxOps: SandboxOps = {
     }
   },
   async writeFile(sandboxName: string, uri: string, content: string) {
+    const resolved = await getSandboxForSession(sandboxName);
+    if (resolved.type === "coolify" && resolved.state) {
+      const sandbox = await connectCoolify(resolved.state);
+      try {
+        await sandbox.writeFile(uri, content, "utf-8");
+      } finally {
+        await sandbox.stop().catch(() => {});
+      }
+      return;
+    }
     const sandbox = await connectSandbox({ type: "vercel", sandboxName });
     try {
       await sandbox.writeFile(uri, content, "utf-8");
@@ -234,6 +432,25 @@ const sandboxOps: SandboxOps = {
     args?: string[],
     cwd?: string,
   ) {
+    const resolved = await getSandboxForSession(sandboxName);
+    if (resolved.type === "coolify" && resolved.state) {
+      const sandbox = await connectCoolify(resolved.state);
+      try {
+        const cmd = args?.length ? `${command} ${args.join(" ")}` : command;
+        const result = await sandbox.exec(
+          cmd,
+          cwd ?? sandbox.workingDirectory,
+          120_000,
+        );
+        return {
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode ?? 0,
+        };
+      } finally {
+        await sandbox.stop().catch(() => {});
+      }
+    }
     const sandbox = await connectSandbox({ type: "vercel", sandboxName });
     try {
       const cmd = args?.length ? `${command} ${args.join(" ")}` : command;
@@ -249,6 +466,133 @@ const sandboxOps: SandboxOps = {
       };
     } finally {
       await sandbox.stop().catch(() => {});
+    }
+  },
+
+  async prompt(
+    sessionId: string,
+    userText: string,
+    cwd: string,
+  ): Promise<string> {
+    const record = await dbStore.get(sessionId);
+    const sandboxName = record?.sandboxName;
+    if (!sandboxName) return "Session not found";
+
+    const resolved = await getSandboxForSession(sandboxName);
+
+    // Sandbox connection — mirrors packages/agent/tools/utils.ts getSandbox()
+    async function connectSandboxForTools(): Promise<
+      | Awaited<ReturnType<typeof connectCoolify>>
+      | Awaited<ReturnType<typeof connectSandbox>>
+    > {
+      if (resolved.type === "coolify" && resolved.state) {
+        return connectCoolify(resolved.state);
+      }
+      return connectSandbox({ type: "vercel", sandboxName });
+    }
+
+    try {
+      const model = gateway("deepseek/deepseek-v4-flash");
+
+      const agent = new ToolLoopAgent({
+        model,
+        instructions:
+          "You are an AI assistant with access to a workspace sandbox at /workspace. " +
+          "Use tools to read, write, and find files. Always produce a final answer.",
+        stopWhen: stepCountIs(10),
+        tools: {
+          write_file: tool({
+            description: "Write content to a file in the workspace.",
+            inputSchema: z.object({
+              filePath: z
+                .string()
+                .describe("File path, e.g. /workspace/README.md"),
+              content: z.string().describe("Content to write"),
+            }),
+            execute: async ({ filePath, content }) => {
+              const fp = filePath.startsWith("/")
+                ? filePath
+                : `${cwd}/${filePath}`;
+              const s = await connectSandboxForTools();
+              try {
+                await s.writeFile(fp, content, "utf-8");
+                return `wrote ${fp}`;
+              } finally {
+                await s.stop().catch(() => {});
+              }
+            },
+          }),
+          read_file: tool({
+            description: "Read a file from the workspace.",
+            inputSchema: z.object({
+              filePath: z
+                .string()
+                .describe("File path, e.g. /workspace/README.md"),
+            }),
+            execute: async ({ filePath }) => {
+              const fp = filePath.startsWith("/")
+                ? filePath
+                : `${cwd}/${filePath}`;
+              const s = await connectSandboxForTools();
+              try {
+                return await s.readFile(fp, "utf-8");
+              } finally {
+                await s.stop().catch(() => {});
+              }
+            },
+          }),
+          bash: tool({
+            description: "Run a shell command in the workspace.",
+            inputSchema: z.object({
+              command: z.string().describe("Shell command"),
+            }),
+            execute: async ({ command }) => {
+              const s = await connectSandboxForTools();
+              try {
+                const r = await s.exec(command, cwd, 120_000);
+                return `exit:${r.exitCode}\nstdout:${r.stdout}\nstderr:${r.stderr}`;
+              } finally {
+                await s.stop().catch(() => {});
+              }
+            },
+          }),
+          glob: tool({
+            description: "Find files matching a glob pattern.",
+            inputSchema: z.object({
+              pattern: z.string().describe("Glob pattern, e.g. **/*.md"),
+            }),
+            execute: async ({ pattern }) => {
+              const findCmd = `find ${cwd} -name "${pattern}" -type f 2>/dev/null || echo ""`;
+              const s = await connectSandboxForTools();
+              try {
+                const r = await s.exec(findCmd, cwd, 10_000);
+                return r.stdout.trim() || "(no matches)";
+              } finally {
+                await s.stop().catch(() => {});
+              }
+            },
+          }),
+        },
+      });
+
+      const result = await agent.stream({
+        messages: [{ role: "user" as const, content: userText }],
+      });
+
+      let text = "";
+      for await (const part of result.fullStream) {
+        const p = part as { type: string; textDelta?: string };
+        if (p.type === "text-delta") text += p.textDelta ?? "";
+      }
+
+      if (!text) text = (result as unknown as { text?: string }).text ?? "";
+      if (!text) text = "(no text in response)";
+
+      return text;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error("[acpmcp] LLM prompt failed:", msg);
+      return `LLM error: ${msg}`;
     }
   },
 };

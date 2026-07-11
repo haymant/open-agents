@@ -24,6 +24,7 @@
     "@open-agents/acp-mcp": "workspace:*",
     "@open-agents/agent": "workspace:*",
     "@open-agents/sandbox": "workspace:*",
+    "@open-agents/sandbox-coolify": "workspace:*",
     "@open-agents/shared": "workspace:*",
     "@pierre/diffs": "^1.0.10",
     "@pierre/trees": "^1.0.0-beta.3",

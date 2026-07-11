@@ -1,132 +1,205 @@
 ---
-title: "ACP-MCP Bridge"
+title: "Headless Agent (ACP-MCP Bridge)"
 feature_id: "acp-mcp"
 artifact: "requirements"
 status: "approved"
-version: "1"
+version: "2"
 owner_agent: "BA"
-last_updated: "2026-07-10"
+last_updated: "2026-07-11"
 ---
 
-# ACP-MCP Bridge
+# Headless Agent — ACP-MCP Bridge
 
 ## 1. Business Value
 
-Enable any MCP-compatible client (Claude Desktop, VS Code Copilot, Cursor, etc.) to interact with Open Agents' infrastructure — sandboxed workspaces, file operations, shell access, and session management — through the Agent Client Protocol (ACP). This allows third-party AI coding tools to use Open Agents as their execution backend without needing the Open Agents chat UI.
+Make Open Agents a **full-fledged headless agent** accessible via MCP that covers all features currently available through the chat UI — session management, LLM prompting with tool calling, durable workflows, sandboxed workspaces, GitHub integration, and project management. Any MCP-compatible client (Claude Desktop, VS Code, Cursor, etc.) can drive the agent without the chat UI.
 
-## 2. Scope
+## 2. Feature Modules
+
+The headless agent is split into independent, composable MCP tool groups:
+
+### 2.1 `acp-mcp-core` (Session & Auth)
+
+Session lifecycle, authentication, configuration.
+
+| Tool | ACP Method | Description |
+|---|---|---|
+| `acp_initialize` | `agent.initialize` | Protocol handshake; returns capabilities |
+| `acp_authenticate` | `agent.authenticate` | Authenticate via bearer token |
+| `acp_logout` | `agent.logout` | Logout |
+| `acp_session_new` | `session.new` | Create session + sandbox + initial chat |
+| `acp_session_load` | `session.load` | Load existing session |
+| `acp_session_list` | `session.list` | List user sessions |
+| `acp_session_delete` | `session.delete` | Archive session |
+| `acp_session_fork` | `session.fork` | Fork session |
+| `acp_session_resume` | `session.resume` | Resume session |
+| `acp_session_close` | `session.close` | Close session |
+| `acp_session_set_mode` | `session.setMode` | Set agent mode |
+| `acp_session_set_config_option` | `session.setConfigOption` | Set config option |
+
+### 2.2 `acp-mcp-llm` (LLM Providers & Prompting)
+
+Configurable LLM providers with full agent-loop prompt execution.
+
+| Tool | ACP Method | Description |
+|---|---|---|
+| `acp_providers_list` | `providers.list` | List configured providers (OpenAI, Anthropic, DeepSeek) |
+| `acp_providers_set` | `providers.set` | Set active provider + model |
+| `acp_providers_disable` | `providers.disable` | Disable a provider |
+| `acp_session_prompt` | `session.prompt` | Execute prompt via full agent loop (LLM + tool calls) |
+| `acp_session_cancel` | `session.cancel` | Cancel in-progress prompt |
+
+### 2.3 `acp-mcp-sandbox` (Workspace & Filesystem)
+
+Isolated sandbox workspace with file and shell operations.
+
+| Tool | ACP Method | Description |
+|---|---|---|
+| `acp_fs_read_text_file` | `fs.readTextFile` | Read file from sandbox |
+| `acp_fs_write_text_file` | `fs.writeTextFile` | Write file to sandbox |
+| `acp_sandbox_edit_file` | ext: `sandbox/edit` | Edit file with find-replace |
+| `acp_terminal_create` | `terminal.create` | Run command in sandbox |
+| `acp_terminal_output` | `terminal.output` | Get terminal output |
+| `acp_sandbox_status` | ext: `sandbox/status` | Get sandbox lifecycle state |
+| `acp_sandbox_snapshot` | ext: `sandbox/snapshot` | Create sandbox snapshot |
+| `acp_sandbox_reset` | ext: `sandbox/reset` | Reset sandbox to clean state |
+
+### 2.4 `acp-mcp-github` (GitHub Integration)
+
+Repository operations: create, clone, commit, push, PR management.
+
+| Tool | ACP Method | Description |
+|---|---|---|
+| `acp_github_create_repo` | ext: `github/create_repo` | Create GitHub repo from workspace |
+| `acp_github_clone` | ext: `github/clone` | Clone existing repo into sandbox |
+| `acp_github_commit_push` | ext: `github/commit_push` | Commit all changes and push |
+| `acp_github_create_pr` | ext: `github/create_pr` | Create pull request |
+| `acp_github_list_branches` | ext: `github/list_branches` | List branches for linked repo |
+| `acp_github_switch_branch` | ext: `github/switch_branch` | Switch to a different branch |
+
+### 2.5 `acp-mcp-workflow` (Durable Workflow)
+
+Long-running workflows with retry, sleep, and state persistence. Uses Vercel WDK with Local World (dev) or custom Postgres World (self-hosted).
+
+| Tool | ACP Method | Description |
+|---|---|---|
+| `acp_workflow_provision` | ext: `workflow/provision` | Kick off sandbox provisioning workflow |
+| `acp_workflow_wait` | ext: `workflow/wait` | Wait for workflow run to complete |
+| `acp_workflow_status` | ext: `workflow/status` | Check workflow run status |
+
+### 2.6 `acp-mcp-document` (Document Events, stubs for NES)
+
+| Tool | ACP Method | Description |
+|---|---|---|
+| `acp_document_did_*` | `document.did*` | Document lifecycle events (stubs) |
+| `acp_nes_*` | `nes.*` | NES methods (stubs) |
+| `acp_request_permission` | `client.session.requestPermission` | Auto-accept permissions |
+
+## 3. Scope
 
 ### In Scope
 
-- New `packages/acp-mcp/` package implementing the ACP→MCP bridge
-- New `apps/web/app/api/acpmcp/route.ts` Next.js API route
-- Bearer-token auth using `ACP_MCP_TOKEN` env var (separate from OAuth)
-- MCP tools mapping to these ACP method groups:
-  - **Auth & Provider:** `agent.initialize`, `agent.authenticate`, `agent.logout`, `providers.list`, `providers.set`, `providers.disable`
-  - **Session Lifecycle:** `session.new`, `session.load`, `session.list`, `session.delete`, `session.fork`, `session.resume`, `session.close`, `session.setMode`, `session.setConfigOption`
-  - **Conversation:** `session.prompt`, `session.cancel`, NES methods (`nes.start`, `nes.suggest`, `nes.accept`, `nes.reject`, `nes.close`)
-  - **Document Events:** `document.didOpen`, `document.didChange`, `document.didClose`, `document.didSave`, `document.didFocus`
-  - **Client Ops:** `client.session.requestPermission`, `client.session.update`, `fs.writeTextFile`, `fs.readTextFile`, `terminal.create`, `terminal.output`, `terminal.release`, `terminal.waitForExit`, `terminal.kill`
-  - **Elicitation:** `elicitation.create`, `elicitation.complete`
-  - **Protocol Control:** `protocol.cancelRequest`
-- Session sandbox backed by `@open-agents/sandbox` (Vercel Firecracker VMs)
-- Unit tests and System Integration Tests (curl-based SIT)
+- All feature modules above, each in `packages/acp-mcp-{module}/`
+- Single API route `apps/web/app/api/acpmcp/route.ts` or per-module routes
+- Bearer-token auth via `ACP_MCP_TOKEN`
+- DB-backed sessions integrated with the existing session/chat schema
+- LLM prompt execution via the full `openAgent.run()` agent loop (the same code path the chat UI uses)
+- Durable workflow execution via Vercel WDK (`workflow` package) with Local World for dev
+- Direct sandbox provisioning via `connectSandbox()`
+- GitHub operations via existing GitHub App/OAuth integration
+- Comprehensive SIT: end-to-end curl-based workflows
 
 ### Out of Scope
 
-- ACP streamable HTTP / WebSocket transport (initial release uses MCP HTTP POST)
-- Full ACP client implementation (we serve the Agent side, not the Client side)
-- Integration with the existing Open Agents chat UI or OAuth system
-
-## 3. Stakeholders
-
-| Role | Interest |
-|---|---|
-| **MCP client users** | Use Open Agents as a remote execution backend from their preferred AI coding tool |
-| **Open Agents maintainers** | No changes to existing code required; bridge is a self-contained module |
+- Coolify / K8s sandbox backends (pluggable in future)
+- Custom WDK World for self-hosted Postgres (future iteration)
+- WebSocket transport for MCP (HTTP POST only)
+- NES suggestion rendering (stubs only)
 
 ## 4. Functional Requirements
 
-### FR-1: MCP Server Discovery
+### FR-LLM-1: Configurable Providers
 
-The endpoint `POST /api/acpmcp` must respond to `tools/list` with the full set of ACP-mapped MCP tool definitions, each with a valid JSON Schema `inputSchema`.
+The bridge must support listing, setting, and disabling LLM providers. Supported providers: OpenAI, Anthropic, DeepSeek (via AI Gateway). Each `acp_session_prompt` call uses the provider configured for that session.
 
-### FR-2: Bearer Token Authentication
+### FR-LLM-2: Full Agent-Loop Prompt
 
-All requests to `/api/acpmcp` must require an `Authorization: Bearer <token>` header where `<token>` equals the `ACP_MCP_TOKEN` environment variable. Requests without a valid token must return HTTP 401 with a JSON-RPC error.
+`acp_session_prompt` must execute the user prompt through the full Open Agents agent loop (`openAgent.run()`), including tool calling, multi-step reasoning, and HITL permission requests. Responses must be streamed or returned synchronously.
 
-### FR-3: Session Lifecycle (DB-Backed)
+### FR-SANDBOX-1: Sandbox Provisioning
 
-The bridge must provide MCP tools for creating, loading, listing, deleting, and closing sessions. Each session maps to a real Open Agents session in the database (via the existing `apps/web/lib/db/sessions.ts` APIs), creating a `sessions` row and an initial chat. Sessions created through the bridge must be visible in the chat UI's session list sidebar. The session ID returned by `acp_session_new` is the real database session ID.
+`acp_session_new` must provision a sandbox directly via `connectSandbox()` with configurable timeout, vcpus, and snapshot, and persist the sandbox state in the database with `lifecycleState: "active"`.
 
-### FR-4: Sandbox File Operations
+### FR-WORKFLOW-1: Durable Workflow Execution
 
-The bridge must provide MCP tools for reading and writing files in a session's sandbox (`fs.readTextFile`, `fs.writeTextFile`). Each operation connects to the sandbox by name, performs the action, then disconnects.
+`acp_workflow_provision` must start a durable sandbox provisioning workflow via `start(sandboxProvisioningWorkflow, [sessionId])`. In local dev, this uses the WDK Local World. `acp_workflow_wait` must poll until the workflow completes or fails.
 
-### FR-5: Sandbox Shell Access
+### FR-GITHUB-1: Repo Creation from Workspace
 
-The bridge must provide MCP tools for running commands in a session's sandbox (`terminal.create`, `terminal.output`). Each command runs via `sandbox.exec()` and returns stdout/stderr/exitCode.
+`acp_github_create_repo` must create a GitHub repository from the current sandbox workspace via the existing `POST /api/github/create-repo` endpoint or directly via Octokit.
 
-### FR-6: Prompt Execution
+### FR-GITHUB-2: Commit & Push
 
-The bridge must provide an MCP tool (`session.prompt`) that accepts a user message and returns an assistant response. The prompt must be persisted as a real chat message in the database via the existing chat/message APIs (`lib/db/sessions.ts`), making it visible in the chat UI. The initial implementation returns a canned response; future iterations can integrate the full Open Agents agent loop.
+`acp_github_commit_push` must commit all uncommitted changes in the sandbox and push to the linked remote, using the same commit flow the chat UI's auto-commit uses.
 
-### FR-7: Initialize & Capabilities
+### FR-GITHUB-3: PR Management
 
-The bridge must respond to `agent.initialize` with the ACP protocol version and advertised capabilities (session lifecycle, file system, terminal, authentication, providers).
+`acp_github_create_pr` must create a pull request from the current sandbox branch, using the same PR flow the chat UI uses.
 
-## 5. Non-Functional Requirements
+## 5. Acceptance Criteria
 
-### NFR-1: Zero Changes to Existing Files
+| ID | Criterion |
+|---|---|
+| AC-1 | `acp_session_prompt` invokes the real agent loop and returns LLM response |
+| AC-2 | `acp_session_prompt` supports tool calling (read/write/bash) |
+| AC-3 | `acp_github_create_repo` creates a GitHub repo visible on github.com |
+| AC-4 | `acp_github_commit_push` commits and pushes sandbox changes to GitHub |
+| AC-5 | `acp_workflow_provision` starts a workflow run via WDK Local World |
+| AC-6 | SIT-11: Create session → create README via prompt → create repo → commit/push |
+| AC-7 | SIT-12: Create session with existing repo → prompt → commit/push or PR |
 
-The bridge must be self-contained in `packages/acp-mcp/` and `apps/web/app/api/acpmcp/`. No existing file in the repository shall be modified.
+## 6. Dependencies
 
-### NFR-2: Sandbox Lifecycle
+- `@agentclientprotocol/sdk` — ACP types
+- `@modelcontextprotocol/sdk` — MCP Server + transport
+- `@open-agents/sandbox` — Sandbox connection
+- `@open-agents/agent` — Full agent loop for prompt execution
+- `workflow` — Vercel WDK for durable workflows (Local World)
+- `@octokit/rest` — GitHub API operations
+- `nanoid` — ID generation
 
-Each sandbox operation (read, write, command) connects, performs the action, and disconnects. Sandboxes persist on the Vercel side and can be reconnected by name. No background lifecycle management is required for initial release; sandboxes use Vercel's built-in timeout (configurable via `timeout` option).
+## 7. SIT Test Plan
 
-### NFR-3: Request/Response Latency
+### SIT-11: End-to-End — New Repo from Scratch
 
-Sandbox operations (file read/write, shell) should complete within the function's `maxDuration` (120s configured). Simple operations (initialize, list sessions) should return in under 1s.
+```
+1. acp_initialize
+2. acp_session_new                           → sessionId
+3. acp_workflow_provision(sessionId)          → runId
+4. acp_workflow_wait(runId)                   → "ready"
+5. acp_session_prompt(sessionId, "create a README.md with this project title: Open Agents Headless")
+                                              → LLM creates README.md in sandbox
+6. acp_fs_read_text_file(sessionId, "/README.md")
+                                              → verify content exists
+7. acp_github_create_repo(sessionId, { name: "acp-mcp-test" })
+                                              → repo created on github.com
+8. acp_github_commit_push(sessionId, "chore: initial README")
+                                              → changes pushed to GitHub
+9. Verify: repo exists on github.com with README.md
+10. acp_session_delete(sessionId)
+```
 
-### NFR-4: Auth Isolation
+### SIT-12: End-to-End — Existing Repo
 
-The `ACP_MCP_TOKEN`-based auth must be completely independent from the existing OAuth/session auth used by other pages and API routes. No user session or OAuth token is required to use the bridge.
-
-### NFR-5: Deployment
-
-The bridge deploys as part of the existing Next.js app. No separate service or infrastructure is needed. Standard `vercel --prod` picks up the new API route automatically.
-
-## 6. Acceptance Criteria
-
-| ID | Criterion | Verification |
-|---|---|---|
-| AC-1 | `POST /api/acpmcp` with `tools/list` returns ≥20 tool definitions | SIT test |
-| AC-2 | `POST /api/acpmcp` without Bearer token returns 401 | curl test |
-| AC-3 | `POST /api/acpmcp` with wrong Bearer token returns 401 | curl test |
-| AC-4 | `acp_initialize` returns protocol version + agent capabilities | Unit test |
-| AC-5 | `acp_session_new` creates a real DB session visible in the chat UI session list | SIT test (verify via `GET /api/sessions`) |
-| AC-6 | `acp_session_list` returns the created session | SIT test |
-| AC-7 | `acp_fs_write_text_file` writes content to a sandbox file | Unit + SIT |
-| AC-8 | `acp_fs_read_text_file` reads back written file content | Unit + SIT |
-| AC-9 | `acp_terminal_create` runs a command and returns output | Unit + SIT |
-| AC-10 | `acp_session_delete` archives a session | SIT test |
-| AC-11 | `acp_session_prompt` creates a real chat message in the session, visible from the chat UI | SIT test (verify via `GET /api/sessions/.../chats`) |
-| AC-12 | No existing files in the repository were modified | `git diff --stat` |
-| AC-13 | `pnpm run ci` passes after adding the new package | CI run |
-
-## 7. Dependencies
-
-- `@agentclientprotocol/sdk` — ACP type definitions and method-name constants
-- `@modelcontextprotocol/sdk` — MCP server types and JSON-RPC structures (optional; can use raw JSON-RPC dispatch)
-- `@open-agents/sandbox` (workspace dep) — Sandbox connection and operations
-- `nanoid` — Session ID generation
-- `ACP_MCP_TOKEN` env var — Bearer token for auth
-
-## 8. Risks and Mitigations
-
-| Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|
-| Sandbox provisioning fails (402) on plans without git-source support | Medium | High | Already handled by error wrapping in `provisioning.ts`; MCP creates sandboxes without source by default |
-| ACP SDK API changes | Low | Medium | Pin to a specific version; the bridge only uses stable type definitions and method constants |
-| Rate limiting from concurrent tool calls | Medium | Low | Each tool call is independent; Vercel scales automatically with concurrent requests |
+```
+1. acp_initialize
+2. acp_session_new({ repoUrl: "https://github.com/user/existing-repo", branch: "main" })
+3. acp_workflow_provision → wait
+4. acp_session_prompt(sessionId, "add 'Headless Agent' to the README")
+                                              → LLM edits README.md
+5. acp_github_commit_push(sessionId, "docs: add headless agent note")
+                                              → pushed to GitHub
+6. (alternative) acp_github_create_pr(sessionId, "Headless Agent update")
+                                              → PR created
+7. acp_session_delete(sessionId)
+```
