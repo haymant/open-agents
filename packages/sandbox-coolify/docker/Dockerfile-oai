@@ -1,0 +1,63 @@
+# Use official Python 3.12 as the base image
+FROM python:3.12-slim
+
+ARG GO_VERSION=1.26.3
+
+# Prevent prompts during installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install dependencies needed for NodeSource and Go
+RUN apt-get update && apt-get install -y \
+    curl \
+    gnupg \
+    wget \
+    git \
+    build-essential \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add Node.js v24 (LTS) repository and install Node and npm
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for Python app execution and Go using the official tarball flow.
+RUN pip install --no-cache-dir uv \
+    && rm -rf /usr/local/go \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz \
+    && tar -C /usr/local -xzf /tmp/go.tgz \
+    && rm /tmp/go.tgz
+
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Default health probe port.
+ENV HEALTH_PORT=1223
+
+# Set up a non-root user
+RUN useradd -ms /bin/bash coder
+USER coder
+WORKDIR /vercel/sandbox
+
+# Expose common app ports and the health probe port
+# - 3000: common Node/Next.js apps
+# - 5173: Vite
+# - 4321: Astro
+# - 1223: lightweight health server
+EXPOSE 3000 5173 4321 1223
+
+USER root
+
+COPY --chown=coder:coder fs.js /vercel/sandbox/fs.js
+COPY --chown=coder:coder package.json /vercel/sandbox/package.json
+COPY --chown=coder:coder entrypoint.sh /vercel/sandbox/entrypoint.sh
+COPY --chown=coder:coder workspace-runtime.sh /vercel/sandbox/workspace-runtime.sh
+
+RUN mkdir -p /workspace \
+    && chown coder:coder /workspace \
+    && chown coder:coder /vercel/sandbox/fs.js /vercel/sandbox/package.json /vercel/sandbox/entrypoint.sh /vercel/sandbox/workspace-runtime.sh \
+    && chmod +x /vercel/sandbox/entrypoint.sh /vercel/sandbox/workspace-runtime.sh
+
+RUN for b in /usr/local/go/bin/*; do ln -sf "$b" /usr/bin/; done
+
+USER coder
+ENTRYPOINT ["/vercel/sandbox/entrypoint.sh"]
