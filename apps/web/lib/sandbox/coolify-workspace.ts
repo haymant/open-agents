@@ -134,7 +134,8 @@ export async function provisionCoolifyWorkspace(
 }
 
 /**
- * Stop and clean up a Coolify workspace.
+ * Stop a Coolify workspace. The Docker container's filesystem is preserved,
+ * so starting the same application UUID later restores the workspace as-is.
  */
 export async function deprovisionCoolifyWorkspace(
   connectorId: string,
@@ -155,6 +156,9 @@ export async function deprovisionCoolifyWorkspace(
 
   try {
     await stopCoolifyApplication(apiConfig, applicationUuid);
+    console.log(
+      `[coolify-workspace] Stopped Coolify app ${applicationUuid} (${config.name})`,
+    );
   } catch (error) {
     console.warn(
       `Failed to stop Coolify app ${applicationUuid}: ${error instanceof Error ? error.message : String(error)}`,

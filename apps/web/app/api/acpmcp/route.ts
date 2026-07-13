@@ -28,6 +28,8 @@ import {
   provisionCoolifyWorkspace,
   deprovisionCoolifyWorkspace,
 } from "@/lib/sandbox/coolify-workspace";
+import { startCoolifyApplication } from "@/lib/sandbox/coolify-api";
+import { getCoolifyConnectorConfig } from "@/lib/sandbox/coolify-connector";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -170,6 +172,9 @@ const dbStore: SessionStore = {
         sessionId,
         sandboxName: sandboxState.sandboxName ?? sandboxName,
         cwd: "/workspace",
+        sandboxMetadata: sandboxState.coolifyPreviewUrls
+          ? { coolifyPreviewUrls: sandboxState.coolifyPreviewUrls }
+          : undefined,
       };
     }
 
@@ -255,6 +260,9 @@ const dbStore: SessionStore = {
       cwd: isCoolify ? "/workspace" : "/vercel/sandbox",
       mode: record.branch ?? undefined,
       sandboxType: sandboxState?.type,
+      sandboxMetadata: sandboxState?.coolifyPreviewUrls
+        ? { coolifyPreviewUrls: sandboxState.coolifyPreviewUrls }
+        : undefined,
     };
   },
 
@@ -292,6 +300,56 @@ const dbStore: SessionStore = {
     }
 
     await updateSession(sessionId, { status: "archived" });
+  },
+
+  async resume(sessionId) {
+    try {
+      const record = await getSessionById(sessionId);
+      if (!record) return;
+      const sandboxState = record.sandboxState as
+        | CoolifyState
+        | null
+        | undefined;
+      if (
+        sandboxState?.type === "coolify" &&
+        sandboxState.coolifyApplicationId &&
+        sandboxState.connectorConfigId
+      ) {
+        const config = getCoolifyConnectorConfig(
+          sandboxState.connectorConfigId,
+        );
+        if (!config) {
+          console.warn(
+            `[acpmcp] Connector "${sandboxState.connectorConfigId}" not found; cannot resume`,
+          );
+          return;
+        }
+        const apiConfig = {
+          apiToken: config.apiToken,
+          baseUrl: config.baseUrl,
+        };
+        // Fire-and-forget: start the app and return immediately.
+        // The caller (e.g. SIT polling loop) waits for the health endpoint.
+        startCoolifyApplication(
+          apiConfig,
+          sandboxState.coolifyApplicationId,
+        ).catch((err) =>
+          console.warn(
+            `[acpmcp] Failed to start Coolify app ${sandboxState.coolifyApplicationId}:`,
+            err,
+          ),
+        );
+        await updateSession(sessionId, { status: "running" });
+        console.log(
+          `[acpmcp] Resuming Coolify app ${sandboxState.coolifyApplicationId} for session ${sessionId}`,
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `[acpmcp] Failed to resume Coolify app for session ${sessionId}:`,
+        error,
+      );
+    }
   },
 
   async update(sessionId, data) {

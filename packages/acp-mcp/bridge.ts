@@ -8,6 +8,7 @@ export interface SessionRecord {
   mode?: string;
   sandboxType?: string;
   configOptions?: Record<string, unknown>;
+  sandboxMetadata?: Record<string, unknown>;
 }
 
 export interface SessionStore {
@@ -16,10 +17,17 @@ export interface SessionStore {
     sandboxType?: string;
     repoUrl?: string;
     branch?: string;
-  }): Promise<{ sessionId: string; sandboxName: string; cwd: string }>;
+  }): Promise<{
+    sessionId: string;
+    sandboxName: string;
+    cwd: string;
+    sandboxMetadata?: Record<string, unknown>;
+  }>;
   get(sessionId: string): Promise<SessionRecord | undefined>;
   list(): Promise<Array<{ sessionId: string }>>;
   delete(sessionId: string): Promise<void>;
+  /** Resume/restart a previously closed session's sandbox. */
+  resume?(sessionId: string): Promise<void>;
   update(sessionId: string, data: Partial<SessionRecord>): Promise<void>;
   /** Persist a user+assistant message pair in the session's chat. */
   createMessage?(
@@ -568,6 +576,9 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
         sessionId: result.sessionId,
         cwd: result.cwd,
         availableModes: [{ id: "code", label: "Code" }],
+        ...(result.sandboxMetadata
+          ? { sandboxMetadata: result.sandboxMetadata }
+          : {}),
       });
     },
 
@@ -582,6 +593,9 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
         cwd: record.cwd,
         availableModes: [{ id: "code", label: "Code" }],
         ...(record.mode ? { currentMode: record.mode } : {}),
+        ...(record.sandboxMetadata
+          ? { sandboxMetadata: record.sandboxMetadata }
+          : {}),
       });
     },
 
@@ -616,6 +630,9 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
       const sessionId = params.sessionId as string;
       const record = await store.get(sessionId);
       if (!record) return err("Session not found");
+      if (store.resume) {
+        await store.resume(sessionId);
+      }
       return ok({ sessionId, cwd: record.cwd });
     },
 
