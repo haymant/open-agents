@@ -96,7 +96,7 @@ The following tests already pass in `acp-mcp-coolify-sit.sh` (CF-1 through CF-17
 
 | ID | Test | Steps | Expected |
 |---|---|---|---|
-| CF-27 | Start dev server | `acp_deploy_start_dev({ sessionId, command: "node /workspace/http.js" })` | Returns `previewUrl` matching sandboxMetadata.app |
+| CF-27 | Start dev server | `acp_deploy_start_dev({ sessionId, command: "node /workspace/http.cjs" })` | Returns `previewUrl` matching sandboxMetadata.app |
 | CF-28 | Get preview URL | `acp_deploy_get_preview_url({ sessionId })` | Returns URL, curl to it returns "Hello World" |
 | CF-29 | Stop dev server | `acp_deploy_stop_dev({ sessionId })` | `{ stopped: true }` |
 

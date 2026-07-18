@@ -5,7 +5,7 @@ const path = require("path");
 function readFile(file) {
   try {
     return fs.readFileSync(file, "utf8");
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -30,7 +30,7 @@ function parseFrontmatter(content) {
 function isDirectory(p) {
   try {
     return fs.statSync(p).isDirectory();
-  } catch (e) {
+  } catch {
     return false;
   }
 }

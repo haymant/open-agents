@@ -70,6 +70,8 @@ type DetachedExecResponse = {
 };
 
 const DEFAULT_WORKING_DIRECTORY = "/workspace";
+const CODE_SERVER_PORT = 1222;
+const HEALTH_PORT = 1223;
 
 // ── helpers ──────────────────────────────────────────────
 
@@ -634,12 +636,16 @@ export class CoolifySandbox implements Sandbox {
   }
 
   domain(port: number): string {
-    if (port === 1222 && this.state.coolifyPreviewUrls?.health) {
-      return this.state.coolifyPreviewUrls.health;
-    }
-    if (port === 1223 && this.state.coolifyPreviewUrls?.codeServer) {
+    if (
+      port === CODE_SERVER_PORT &&
+      this.state.coolifyPreviewUrls?.codeServer
+    ) {
       return this.state.coolifyPreviewUrls.codeServer;
     }
+    if (port === HEALTH_PORT && this.state.coolifyPreviewUrls?.health) {
+      return this.state.coolifyPreviewUrls.health;
+    }
+    // Coolify proxies the main exposed port — return the app URL
     return (
       this.state.coolifyPreviewUrls?.app ??
       this.state.coolifyApplicationUrl ??

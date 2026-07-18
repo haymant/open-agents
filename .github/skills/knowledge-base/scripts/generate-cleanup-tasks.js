@@ -6,7 +6,7 @@ const { spawnSync } = require("child_process");
 function isDirectory(p) {
   try {
     return fs.statSync(p).isDirectory();
-  } catch (e) {
+  } catch {
     return false;
   }
 }

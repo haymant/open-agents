@@ -401,6 +401,9 @@ const sandboxStateCache = new Map<
   { type: string; state: CoolifyState }
 >();
 
+// Track dev server process IDs for each session (keyed by sessionId)
+const devServerProcesses = new Map<string, string>();
+
 function cacheSandboxState(
   sandboxName: string,
   state: Record<string, unknown>,
@@ -1075,6 +1078,66 @@ const sandboxOps: SandboxOps = {
     });
 
     return { prUrl: response.data.html_url };
+  },
+
+  async startDevServer(
+    sessionId: string,
+    command?: string,
+  ): Promise<{ previewUrl: string }> {
+    const record = await getSessionById(sessionId);
+    if (!record) throw new Error("Session not found");
+    const sandboxState = record.sandboxState as CoolifyState | null;
+    if (!sandboxState) throw new Error("No sandbox state");
+
+    const sandbox = await connectCoolify(sandboxState);
+    try {
+      const cmd = command ?? "npm run dev";
+      const result = await sandbox.execDetached(cmd, "/workspace");
+      // Track the dev server process so we can stop it later
+      devServerProcesses.set(sessionId, result.commandId);
+      const previewUrl = sandbox.domain(3000);
+      return { previewUrl };
+    } finally {
+      // Don't stop the sandbox — the dev server must keep running
+    }
+  },
+
+  async stopDevServer(sessionId: string): Promise<void> {
+    const commandId = devServerProcesses.get(sessionId);
+    if (!commandId) return;
+
+    const record = await getSessionById(sessionId);
+    if (!record) return;
+    const sandboxState = record.sandboxState as CoolifyState | null;
+    if (!sandboxState) return;
+
+    const sandbox = await connectCoolify(sandboxState);
+    try {
+      // Kill only the tracked process by PID — never use pkill -f (would kill fs.js)
+      await sandbox.exec(
+        `kill ${commandId} 2>/dev/null; true`,
+        "/workspace",
+        10_000,
+      );
+    } finally {
+      await sandbox.stop().catch(() => {});
+    }
+    devServerProcesses.delete(sessionId);
+  },
+
+  async getPreviewUrl(sessionId: string, port?: number): Promise<string> {
+    const record = await getSessionById(sessionId);
+    if (!record) throw new Error("Session not found");
+    const sandboxState = record.sandboxState as CoolifyState | null;
+    if (!sandboxState) throw new Error("No sandbox state");
+
+    const sandbox = await connectCoolify(sandboxState);
+    try {
+      const url = sandbox.domain(port ?? 3000);
+      return url;
+    } finally {
+      await sandbox.stop().catch(() => {});
+    }
   },
 };
 

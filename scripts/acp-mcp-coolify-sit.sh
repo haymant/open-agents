@@ -276,23 +276,23 @@ else
   fail "No app URL in session metadata: $(echo "$RESP" | python3 -c "import sys,json; print(str(json.load(sys.stdin))[:200])" 2>/dev/null)"
 fi
 
-# ── 13. Copy http.js to sandbox ──────────────────────────
-echo "--- SIT-CF-13: Copy http.js to sandbox ---" | tee -a "$OUT"
-HTTP_JS_CONTENT=$(cat scripts/http.js)
-ESCAPED=$(echo "$HTTP_JS_CONTENT" | python3 -c "
+# ── 13. Copy http.cjs to sandbox ──────────────────────────
+echo "--- SIT-CF-13: Copy http.cjs to sandbox ---" | tee -a "$OUT"
+HTTP_CJS_CONTENT=$(cat scripts/http.cjs)
+ESCAPED=$(echo "$HTTP_CJS_CONTENT" | python3 -c "
 import sys, json
 print(json.dumps(sys.stdin.read()))
 " 2>/dev/null || echo "")
-RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_fs_write_text_file\",\"arguments\":{\"sessionId\":\"$SID\",\"uri\":\"file:///workspace/http.js\",\"content\":$ESCAPED}}}" 30)
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_fs_write_text_file\",\"arguments\":{\"sessionId\":\"$SID\",\"uri\":\"file:///workspace/http.cjs\",\"content\":$ESCAPED}}}" 30)
 HAS_ERROR=$(echo "$RESP" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 print('error' in r or r.get('result',{}).get('isError',False))
 " 2>/dev/null || echo "True")
 if [ "$HAS_ERROR" = "True" ] || [ "$HAS_ERROR" = "true" ]; then
-  fail "Copy http.js failed: $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('error',r.get('result',{}).get('content',[{}])[0].get('text','unknown'))[:150])" 2>/dev/null)"
+  fail "Copy http.cjs failed: $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('error',r.get('result',{}).get('content',[{}])[0].get('text','unknown'))[:150])" 2>/dev/null)"
 else
-  ok "http.js copied to sandbox"
+  ok "http.cjs copied to sandbox"
 fi
 
 # ── 14. Verify container health endpoint ────────────────
@@ -303,6 +303,69 @@ if [ "$CURL_OUTPUT" = "ok" ]; then
   ok "Health endpoint returned 'ok'"
 else
   fail "Health endpoint got: '$CURL_OUTPUT' (expected 'ok')"
+fi
+
+# ── P3: Dev Server Tools ─────────────────────────────────
+echo "--- SIT-CF-25: Start dev server (node http.cjs on port 3000) ---" | tee -a "$OUT"
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":400,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_deploy_start_dev\",\"arguments\":{\"sessionId\":\"$SID\",\"command\":\"cd /workspace && node http.cjs &\"}}}" 30)
+PREVIEW_URL=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'):
+    print('ERROR:' + str(r['error']))
+    sys.exit(0)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('previewUrl', ''))
+" 2>/dev/null || echo "")
+if [ -n "$PREVIEW_URL" ] && [ "$PREVIEW_URL" != "ERROR" ]; then
+  ok "acp_deploy_start_dev returned preview URL: $PREVIEW_URL"
+  # Verify the dev server is actually responding (http.cjs serves "Hello World" on :3000)
+  echo "  Verifying dev server responds via curl ..." | tee -a "$OUT"
+  CURL_RESP=$(curl -sk --max-time 10 "$PREVIEW_URL" 2>/dev/null || echo "")
+  if echo "$CURL_RESP" | grep -q "Hello World"; then
+    ok "Dev server responds with 'Hello World'"
+  else
+    fail "Dev server curl got: '$CURL_RESP' (expected 'Hello World')"
+  fi
+else
+  fail "acp_deploy_start_dev: $(echo "$RESP" | python3 -c "import sys,json; print(str(json.load(sys.stdin))[:200])" 2>/dev/null)"
+fi
+
+echo "--- SIT-CF-26: Get preview URL ---" | tee -a "$OUT"
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":401,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_deploy_get_preview_url\",\"arguments\":{\"sessionId\":\"$SID\"}}}" 30)
+GOT_URL=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'):
+    print('ERROR:' + str(r['error']))
+    sys.exit(0)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('previewUrl', ''))
+" 2>/dev/null || echo "")
+if [ -n "$GOT_URL" ] && [ "$GOT_URL" != "ERROR" ]; then
+  ok "acp_deploy_get_preview_url: $GOT_URL"
+else
+  fail "acp_deploy_get_preview_url: '$GOT_URL'"
+fi
+
+echo "--- SIT-CF-27: Stop dev server ---" | tee -a "$OUT"
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":402,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_deploy_stop_dev\",\"arguments\":{\"sessionId\":\"$SID\"}}}" 30)
+STOPPED=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'):
+    print('false')
+    sys.exit(0)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('stopped', 'false'))
+" 2>/dev/null || echo "false")
+if [ "$STOPPED" = "True" ] || [ "$STOPPED" = "true" ]; then
+  ok "acp_deploy_stop_dev stopped dev server"
+else
+  fail "acp_deploy_stop_dev: $(echo "$RESP" | python3 -c "import sys,json; print(str(json.load(sys.stdin))[:200])" 2>/dev/null)"
 fi
 
 

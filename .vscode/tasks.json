@@ -1,19 +1,19 @@
 {
-	"version": "2.0.0",
-	"tasks": [
-		{
-			"label": "restart-dev",
-			"type": "shell",
-			"command": "cd /home/data/git/haymant/open-agents && lsof -ti:3000 | xargs kill -9 2>/dev/null; sleep 1; pnpm web &",
-			"isBackground": true,
-			"problemMatcher": []
-		},
-		{
-			"label": "vercel-dev",
-			"type": "shell",
-			"command": "cd /home/data/git/haymant/open-agents/apps/web && vercel dev --listen 3000",
-			"isBackground": true,
-			"problemMatcher": []
-		}
-	]
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "restart-dev",
+      "type": "shell",
+      "command": "cd /home/data/git/haymant/open-agents && lsof -ti:3000 | xargs kill -9 2>/dev/null; sleep 1; pnpm web &",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "vercel-dev",
+      "type": "shell",
+      "command": "cd /home/data/git/haymant/open-agents/apps/web && vercel dev --listen 3000",
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
 }

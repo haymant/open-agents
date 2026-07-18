@@ -92,6 +92,15 @@ export interface SandboxOps {
     base?: string,
     branch?: string,
   ): Promise<{ prUrl: string }>;
+  /** Start a dev server in the session sandbox and return its preview URL. */
+  startDevServer?(
+    sessionId: string,
+    command?: string,
+  ): Promise<{ previewUrl: string }>;
+  /** Stop a running dev server in the session sandbox. */
+  stopDevServer?(sessionId: string): Promise<void>;
+  /** Get the preview URL for a session's sandbox at the given port. */
+  getPreviewUrl?(sessionId: string, port?: number): Promise<string>;
 }
 
 // ── Tool definitions (JSON Schema for MCP) ────────────────────────
@@ -638,6 +647,46 @@ export const toolDefinitions: Record<
       required: ["sessionId"],
     },
   },
+  acp_deploy_start_dev: {
+    name: "acp_deploy_start_dev",
+    description:
+      "Start a dev server in the session sandbox. Returns the preview URL where the server is accessible.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: stringProp("Session ID"),
+        command: stringProp(
+          "Command to start the dev server (default: npm run dev)",
+        ),
+      },
+      required: ["sessionId"],
+    },
+  },
+  acp_deploy_stop_dev: {
+    name: "acp_deploy_stop_dev",
+    description:
+      "Stop a running dev server in the session sandbox started via acp_deploy_start_dev.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: stringProp("Session ID"),
+      },
+      required: ["sessionId"],
+    },
+  },
+  acp_deploy_get_preview_url: {
+    name: "acp_deploy_get_preview_url",
+    description:
+      "Get the preview URL for a session sandbox at the specified port.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: stringProp("Session ID"),
+        port: numberProp("Port to get the preview URL for (default: 3000)"),
+      },
+      required: ["sessionId"],
+    },
+  },
 };
 
 function ok(data: unknown): ToolContent[] {
@@ -1051,6 +1100,38 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
         params.branch as string | undefined,
       );
       return ok(result);
+    },
+
+    // ── Dev Server Tools ─────────────────────────────────
+
+    async acp_deploy_start_dev(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      if (!sandbox.startDevServer) return err("Dev server tools not supported");
+      const result = await sandbox.startDevServer(
+        params.sessionId as string,
+        params.command as string | undefined,
+      );
+      return ok(result);
+    },
+
+    async acp_deploy_stop_dev(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      if (!sandbox.stopDevServer) return err("Dev server tools not supported");
+      await sandbox.stopDevServer(params.sessionId as string);
+      return ok({ stopped: true });
+    },
+
+    async acp_deploy_get_preview_url(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      if (!sandbox.getPreviewUrl) return err("Dev server tools not supported");
+      const url = await sandbox.getPreviewUrl(
+        params.sessionId as string,
+        params.port as number | undefined,
+      );
+      return ok({ previewUrl: url });
     },
   };
 }

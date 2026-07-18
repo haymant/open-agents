@@ -2,11 +2,11 @@
 title: "Project Sessions — Implementation Plan"
 feature_id: "project-sessions"
 artifact: "implementation-plan"
-status: "draft"
-version: "1"
+status: "in-progress"
+version: "2"
 owner_agent: "Developer"
 parent_feature: "project-sessions"
-last_updated: "2026-07-13"
+last_updated: "2026-07-18"
 ---
 
 # Project Sessions — Implementation Plan
@@ -165,9 +165,9 @@ Add:
 
 ---
 
-## Phase P3: Dev Server Tools
+## Phase P3: Dev Server Tools ✅
 
-**Goal**: Start/stop dev servers in sandboxes and get preview URLs.
+**Goal**: Start/stop dev servers in sandboxes and get preview URLs. **Implemented**.
 
 ### P3.1 Add deploy tools to bridge
 
