@@ -54,6 +54,44 @@ export interface SandboxOps {
   ): Promise<ExecResult>;
   /** Send a prompt to the LLM agent. Returns the assistant's text response. */
   prompt?(sessionId: string, userText: string, cwd: string): Promise<string>;
+  /** Set environment variables (secrets) on a session's sandbox. */
+  setSecrets?(
+    sessionId: string,
+    envVars: Record<string, string>,
+  ): Promise<{ stored: number }>;
+  /** List environment variable names on a session's sandbox. */
+  listSecrets?(sessionId: string): Promise<Array<{ name: string }>>;
+  /** Delete an environment variable from a session's sandbox. */
+  deleteSecret?(sessionId: string, name: string): Promise<void>;
+  /** Create a new GitHub repo. */
+  createRepo?(
+    repoName: string,
+    org?: string,
+    isPrivate?: boolean,
+    branch?: string,
+  ): Promise<{ repoUrl: string; cloneUrl: string }>;
+  /** Attach an existing GitHub repo to a session. */
+  attachRepo?(
+    sessionId: string,
+    repoUrl: string,
+    branch?: string,
+  ): Promise<{ status: string; cwd: string }>;
+  /** Stage, pull --rebase, and push changes. Falls back to a temp branch if push to original branch fails (conflict). */
+  gitPush?(
+    sessionId: string,
+    message?: string,
+  ): Promise<{
+    success: boolean;
+    branch?: string;
+    pushedToNewBranch?: boolean;
+  }>;
+  /** Create a pull request from the session's branch (or an explicit branch). */
+  createPr?(
+    sessionId: string,
+    title?: string,
+    base?: string,
+    branch?: string,
+  ): Promise<{ prUrl: string }>;
 }
 
 // ── Tool definitions (JSON Schema for MCP) ────────────────────────
@@ -499,6 +537,107 @@ export const toolDefinitions: Record<
       required: ["requestId"],
     },
   },
+  acp_secret_set: {
+    name: "acp_secret_set",
+    description:
+      "Set environment variables (secrets) on a session's sandbox. " +
+      "Values are stored via Coolify env var API and never returned in responses.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: stringProp("Session ID"),
+        envVars: {
+          type: "object",
+          description: "Key-value pairs of environment variables to set",
+          additionalProperties: { type: "string" },
+        },
+      },
+      required: ["sessionId", "envVars"],
+    },
+  },
+  acp_secret_list: {
+    name: "acp_secret_list",
+    description:
+      "List environment variable names set on a session's sandbox. Returns names only, never values.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: stringProp("Session ID") },
+      required: ["sessionId"],
+    },
+  },
+  acp_secret_delete: {
+    name: "acp_secret_delete",
+    description: "Delete an environment variable from a session's sandbox.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: stringProp("Session ID"),
+        name: stringProp("Environment variable name to delete"),
+      },
+      required: ["sessionId", "name"],
+    },
+  },
+  acp_github_create_repo: {
+    name: "acp_github_create_repo",
+    description: "Create a new GitHub repository and return its URL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repoName: stringProp("Repository name"),
+        org: stringProp(
+          "GitHub organization (optional, uses user account if omitted)",
+        ),
+        private: {
+          type: "boolean",
+          description: "Whether the repo should be private",
+        },
+        branch: stringProp("Default branch (default: main)"),
+      },
+      required: ["repoName"],
+    },
+  },
+  acp_github_attach_repo: {
+    name: "acp_github_attach_repo",
+    description:
+      "Attach an existing GitHub repo to a session. The repo is cloned into /workspace.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: stringProp("Session ID"),
+        repoUrl: stringProp(
+          "GitHub repository URL (e.g. https://github.com/owner/repo)",
+        ),
+        branch: stringProp("Branch to checkout"),
+      },
+      required: ["sessionId", "repoUrl"],
+    },
+  },
+  acp_github_push: {
+    name: "acp_github_push",
+    description:
+      "Stage (git add -A), pull --rebase, and push to the session's branch. Falls back to a temp branch on conflict.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: stringProp("Session ID"),
+      },
+      required: ["sessionId"],
+    },
+  },
+  acp_github_create_pr: {
+    name: "acp_github_create_pr",
+    description: "Create a pull request from a branch to the target branch.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: stringProp("Session ID"),
+        title: stringProp("PR title (default: auto-generated)"),
+        base: stringProp("Target branch (default: main)"),
+        branch: stringProp("Head branch (default: session's branch)"),
+      },
+      required: ["sessionId"],
+    },
+  },
 };
 
 function ok(data: unknown): ToolContent[] {
@@ -830,6 +969,88 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
 
     async acp_cancel_request(): Promise<ToolContent[]> {
       return ok({});
+    },
+
+    // ── Secret Management ──────────────────────────────────
+
+    async acp_secret_set(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      const sessionId = params.sessionId as string;
+      const envVars = params.envVars as Record<string, string>;
+      if (!sandbox.setSecrets) return err("Secret management not supported");
+      const result = await sandbox.setSecrets(sessionId, envVars);
+      return ok(result);
+    },
+
+    async acp_secret_list(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      const sessionId = params.sessionId as string;
+      if (!sandbox.listSecrets) return err("Secret management not supported");
+      const secrets = await sandbox.listSecrets(sessionId);
+      return ok({ secrets });
+    },
+
+    async acp_secret_delete(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      const sessionId = params.sessionId as string;
+      const name = params.name as string;
+      if (!sandbox.deleteSecret) return err("Secret management not supported");
+      await sandbox.deleteSecret(sessionId, name);
+      return ok({ deleted: true });
+    },
+
+    // ── GitHub Tools ──────────────────────────────────────
+
+    async acp_github_create_repo(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      if (!sandbox.createRepo) return err("GitHub tools not supported");
+      const result = await sandbox.createRepo(
+        params.repoName as string,
+        params.org as string | undefined,
+        params.private as boolean | undefined,
+        params.branch as string | undefined,
+      );
+      return ok(result);
+    },
+
+    async acp_github_attach_repo(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      if (!sandbox.attachRepo) return err("GitHub tools not supported");
+      const result = await sandbox.attachRepo(
+        params.sessionId as string,
+        params.repoUrl as string,
+        params.branch as string | undefined,
+      );
+      return ok(result);
+    },
+
+    async acp_github_push(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      if (!sandbox.gitPush) return err("GitHub tools not supported");
+      const result = await sandbox.gitPush(
+        params.sessionId as string,
+        params.message as string | undefined,
+      );
+      return ok(result);
+    },
+
+    async acp_github_create_pr(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      if (!sandbox.createPr) return err("GitHub tools not supported");
+      const result = await sandbox.createPr(
+        params.sessionId as string,
+        params.title as string | undefined,
+        params.base as string | undefined,
+        params.branch as string | undefined,
+      );
+      return ok(result);
     },
   };
 }

@@ -125,6 +125,14 @@ export async function provisionCoolifyWorkspace(
     coolifyPreviewUrls: previewUrls,
     sandboxName: `coolify-${params.sessionId}`,
     sandboxId: params.sessionId,
+    ...(params.repoUrl
+      ? {
+          source: {
+            repo: params.repoUrl,
+            branch: params.branch ?? "main",
+          } as const,
+        }
+      : {}),
   };
 
   return {

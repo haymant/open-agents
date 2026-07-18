@@ -1,0 +1,51 @@
+# Use official Microsoft Playwright base image (includes all browser binaries + system deps)
+FROM mcr.microsoft.com/playwright:v1.49.0-noble
+
+# Prevent prompts during installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install additional tooling needed by the workspace
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    git \
+    build-essential \
+    ca-certificates \
+    jq \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js (Playwright image already includes it, ensure we have a recent version)
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# .NET SDK is pre-installed in the Playwright image; install uv for Python
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Default health probe port
+ENV HEALTH_PORT=1223
+
+# Set up a non-root user (Playwright image already has a user, align with coder pattern)
+RUN useradd -ms /bin/bash coder 2>/dev/null || true
+USER coder
+WORKDIR /vercel/sandbox
+
+# Expose common app ports and health probe
+EXPOSE 3000 5173 4321 9323 1223
+
+USER root
+
+COPY --chown=coder:coder fs.js /vercel/sandbox/fs.js
+COPY --chown=coder:coder package.json /vercel/sandbox/package.json
+COPY --chown=coder:coder entrypoint.sh /vercel/sandbox/entrypoint.sh
+COPY --chown=coder:coder workspace-runtime.sh /vercel/sandbox/workspace-runtime.sh
+
+RUN mkdir -p /workspace \
+    && chown coder:coder /workspace \
+    && chown coder:coder /vercel/sandbox/fs.js /vercel/sandbox/package.json /vercel/sandbox/entrypoint.sh /vercel/sandbox/workspace-runtime.sh \
+    && chmod +x /vercel/sandbox/entrypoint.sh /vercel/sandbox/workspace-runtime.sh
+
+USER coder
+ENTRYPOINT ["/vercel/sandbox/entrypoint.sh"]

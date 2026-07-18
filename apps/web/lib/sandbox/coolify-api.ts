@@ -423,7 +423,7 @@ function wait(ms: number): Promise<void> {
 
 // ── env helpers ──────────────────────────────────────────
 
-async function setCoolifyAppEnv(
+export async function setCoolifyAppEnv(
   config: CoolifyRequestConfig,
   appUuid: string,
   key: string,

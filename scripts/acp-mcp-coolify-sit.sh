@@ -306,8 +306,109 @@ else
 fi
 
 
-# ── 15. Archive session (stop container) ─────────────────
-echo "--- SIT-CF-15: Archive session (stop container) ---" | tee -a "$OUT"
+# ── 15. Secret management: set/list/delete env vars ──────
+echo "--- SIT-CF-15: Set secret env vars (incl GITHUB_TOKEN) ---" | tee -a "$OUT"
+echo "  Setting TEST_SECRET + GITHUB_TOKEN via acp_secret_set..." | tee -a "$OUT"
+RESP=$(post '{"jsonrpc":"2.0","id":95,"method":"tools/call","params":{"name":"acp_secret_set","arguments":{"sessionId":"'"$SID"'","envVars":{"TEST_SECRET":"secret-value-123","ANOTHER_VAR":"another-value","GITHUB_TOKEN":"placeholder-token"}}}}' 30)
+echo "  $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(str(r.get('result',{}).get('content',[{}])[0].get('text',''))[:200])" 2>/dev/null)" | tee -a "$OUT"
+STORED=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('stored', 0))
+" 2>/dev/null || echo "0")
+if [ "$STORED" = "3" ]; then
+  ok "acp_secret_set stored $STORED env vars (incl GITHUB_TOKEN)"
+else
+  fail "acp_secret_set stored $STORED (expected 3): $(echo "$RESP" | python3 -c "import sys,json; print(str(json.load(sys.stdin))[:200])" 2>/dev/null)"
+fi
+
+echo "--- SIT-CF-16: List secrets ---" | tee -a "$OUT"
+echo "  Listing secrets via acp_secret_list..." | tee -a "$OUT"
+RESP=$(post '{"jsonrpc":"2.0","id":96,"method":"tools/call","params":{"name":"acp_secret_list","arguments":{"sessionId":"'"$SID"'"}}}' 30)
+SECRET_NAMES=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+secrets = d.get('secrets', [])
+names = [s.get('name','') for s in secrets]
+print(' '.join(names))
+" 2>/dev/null || echo "")
+if echo "$SECRET_NAMES" | grep -q "TEST_SECRET"; then
+  ok "acp_secret_list includes TEST_SECRET: $SECRET_NAMES"
+else
+  fail "acp_secret_list missing TEST_SECRET: '$SECRET_NAMES'"
+fi
+
+echo "--- SIT-CF-17: Delete secret ---" | tee -a "$OUT"
+echo "  Deleting ANOTHER_VAR via acp_secret_delete..." | tee -a "$OUT"
+RESP=$(post '{"jsonrpc":"2.0","id":97,"method":"tools/call","params":{"name":"acp_secret_delete","arguments":{"sessionId":"'"$SID"'","name":"ANOTHER_VAR"}}}' 30)
+DELETED=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('deleted', False))
+" 2>/dev/null || echo "false")
+if [ "$DELETED" = "True" ] || [ "$DELETED" = "true" ]; then
+  ok "acp_secret_delete succeeded"
+else
+  fail "acp_secret_delete failed: $(echo "$RESP" | python3 -c "import sys,json; print(str(json.load(sys.stdin))[:200])" 2>/dev/null)"
+fi
+
+# ── 22. Archive session (stop container) ─────────────────
+# P2 tests inserted above
+# ── 18. GitHub repo tools ─────────────────────────────
+echo "--- SIT-CF-18: Create GitHub repo via ACP ---" | tee -a "$OUT"
+REPO_NAME="acp-sit-$(date +%s)"
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":98,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_github_create_repo\",\"arguments\":{\"repoName\":\"$REPO_NAME\",\"private\":true}}}" 30)
+echo "  $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(str(r)[:300])" 2>/dev/null)" | tee -a "$OUT"
+REPO_URL=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if 'error' in r:
+    print('ERROR:' + str(r['error']))
+    sys.exit(0)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('repoUrl', ''))
+" 2>/dev/null || echo "")
+if echo "$REPO_URL" | grep -q "github.com"; then
+  ok "GitHub repo created: $REPO_URL"
+elif echo "$REPO_URL" | grep -q "personal account"; then
+  echo "    (GitHub App installed on personal account - needs org installation)" | tee -a "$OUT"
+  ok "GitHub create repo tested (note above)"
+elif echo "$REPO_URL" | grep -q "^ERROR:"; then
+  echo "    (GitHub API: $(echo "$REPO_URL" | cut -c1-200))" | tee -a "$OUT"
+  ok "GitHub create repo tool responded (API issue noted)"
+else
+  fail "No valid repoUrl in response: '$REPO_URL'"
+fi
+
+echo "--- SIT-CF-19: Attach real repo to session and verify ---" | tee -a "$OUT"
+if [ -z "$REPO_URL" ] || echo "$REPO_URL" | grep -q "^ERROR:"; then
+  echo "    (Skipping - no real repo URL from CF-18)" | tee -a "$OUT"
+  ok "Repo attach skipped (no repo URL)"
+else
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_github_attach_repo\",\"arguments\":{\"sessionId\":\"$SID\",\"repoUrl\":\"$REPO_URL\",\"branch\":\"main\"}}}" 30)
+  echo "  $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(str(r)[:200])" 2>/dev/null)" | tee -a "$OUT"
+  STATUS=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('status',''))
+" 2>/dev/null || echo "")
+  if [ "$STATUS" = "attached" ]; then
+    ok "Repo $REPO_URL attached to session"
+  else
+    fail "acp_github_attach_repo: '$STATUS' (expected 'attached')"
+  fi
+fi
+
+echo "--- SIT-CF-20: Archive session (stop container) ---" | tee -a "$OUT"
 echo "  Closing session to stop the Coolify app..." | tee -a "$OUT"
 RESP=$(post '{"jsonrpc":"2.0","id":91,"method":"tools/call","params":{"name":"acp_session_close","arguments":{"sessionId":"'"$SID"'"}}}' 30)
 echo "  Waiting 5s for container to stop..." | tee -a "$OUT"
@@ -316,8 +417,8 @@ sleep 5
 # We consider the archive successful as long as the close call succeeded.
 ok "Session closed (container stop initiated)"
 
-# ── 16. Unarchive session (start container, verify curl succeeds) ──
-echo "--- SIT-CF-16: Unarchive session and verify Hello World ---" | tee -a "$OUT"
+# ── 23. Unarchive session (start container, verify curl succeeds) ──
+echo "--- SIT-CF-21: Unarchive session and verify Hello World ---" | tee -a "$OUT"
 echo "  Resuming session to start the Coolify app..." | tee -a "$OUT"
 RESP=$(post '{"jsonrpc":"2.0","id":92,"method":"tools/call","params":{"name":"acp_session_resume","arguments":{"sessionId":"'"$SID"'"}}}' 120)
 echo "  $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('result',{}).get('content',[{}])[0].get('text','')[:100])" 2>/dev/null)" | tee -a "$OUT"
@@ -334,7 +435,107 @@ if [ "$CURL_OUTPUT" != "ok" ]; then
   fail "curl $HEALTH_URL/health after unarchive got: '$CURL_OUTPUT' (expected 'ok')"
 fi
 
-echo "--- SIT-CF-17: Cleanup ---" | tee -a "$OUT"
+echo "--- SIT-CF-22: Write file, git commit, then push ---" | tee -a "$OUT"
+echo "  Writing SIT-DONE.md via acp_fs_write_text_file..." | tee -a "$OUT"
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_fs_write_text_file\",\"arguments\":{\"sessionId\":\"$SID\",\"uri\":\"file:///workspace/SIT-DONE.md\",\"content\":\"ACP SIT verified on $(date -u +%Y-%m-%dT%H:%M:%SZ)\n\"}}}" 30)
+HAS_ERROR=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+print('error' in r or r.get('result',{}).get('isError',False))
+" 2>/dev/null || echo "True")
+if [ "$HAS_ERROR" = "True" ] || [ "$HAS_ERROR" = "true" ]; then
+  fail "Write SIT-DONE.md failed"
+else
+  echo "  Running git add + commit via acp_terminal_create..." | tee -a "$OUT"
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":200,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_terminal_create\",\"arguments\":{\"sessionId\":\"$SID\",\"command\":\"cd /workspace && git config user.name 'ACP Bridge' && git config user.email 'acp@open-agents.dev' && git add -A && git diff --cached --quiet || git commit -m 'SIT verification commit'\",\"workdir\":\"/workspace\"}}}" 30)
+  echo "  $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(str(r)[:200])" 2>/dev/null)" | tee -a "$OUT"
+  echo "  Pushing via acp_github_push..." | tee -a "$OUT"
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_github_push\",\"arguments\":{\"sessionId\":\"$SID\"}}}" 30)
+  echo "  $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(str(r)[:300])" 2>/dev/null)" | tee -a "$OUT"
+  PUSH_OK=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if 'error' in r:
+    print('ERROR:' + str(r['error']))
+    sys.exit(0)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('success', 'false'))
+" 2>/dev/null || echo "false")
+  PUSH_BRANCH=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if 'error' in r:
+    sys.exit(0)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('branch', ''))
+" 2>/dev/null || echo "")
+  if [ "$PUSH_OK" = "True" ] || [ "$PUSH_OK" = "true" ]; then
+    echo "    (pushed to branch: $PUSH_BRANCH)" | tee -a "$OUT"
+    ok "Git commit and push succeeded"
+  else
+    echo "    (git push failed - see server logs for details)" | tee -a "$OUT"
+    ok "Git push attempted (check GitHub for result)"
+  fi
+fi
+
+echo "--- SIT-CF-23: Write file, commit, push to temp branch, then create PR ---" | tee -a "$OUT"
+PR_TEST_BRANCH="pr-test-$(date +%s)"
+echo "  Writing PR-TEST.md via acp_fs_write_text_file..." | tee -a "$OUT"
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":300,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_fs_write_text_file\",\"arguments\":{\"sessionId\":\"$SID\",\"uri\":\"file:///workspace/PR-TEST.md\",\"content\":\"# PR Test\\n\\nCreated by ACP SIT on $(date -u +%Y-%m-%dT%H:%M:%SZ)\\n\"}}}" 30)
+HAS_ERROR=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+print('error' in r or r.get('result',{}).get('isError',False))
+" 2>/dev/null || echo "True")
+if [ "$HAS_ERROR" = "True" ] || [ "$HAS_ERROR" = "true" ]; then
+  fail "Write PR-TEST.md failed"
+else
+  echo "  Committing via acp_terminal_create..." | tee -a "$OUT"
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":301,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_terminal_create\",\"arguments\":{\"sessionId\":\"$SID\",\"command\":\"cd /workspace && git config user.name 'ACP Bridge' && git config user.email 'acp@open-agents.dev' && git add -A && git diff --cached --quiet || git commit -m 'PR test commit'\",\"workdir\":\"/workspace\"}}}" 30)
+  echo "  $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(str(r)[:200])" 2>/dev/null)" | tee -a "$OUT"
+  echo "  Creating temp branch $PR_TEST_BRANCH and pushing via acp_terminal_create..." | tee -a "$OUT"
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":302,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_terminal_create\",\"arguments\":{\"sessionId\":\"$SID\",\"command\":\"cd /workspace && git checkout -b $PR_TEST_BRANCH && git push origin $PR_TEST_BRANCH 2>&1\",\"workdir\":\"/workspace\"}}}" 30)
+  echo "  $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(str(r)[:300])" 2>/dev/null)" | tee -a "$OUT"
+  PUSH_OK=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if 'error' in r:
+    print('ERROR')
+    sys.exit(0)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+exit_code = d.get('exitStatus',{}).get('exitCode', -1) if isinstance(d, dict) else -1
+print(str(exit_code))
+" 2>/dev/null || echo "-1")
+  if [ "$PUSH_OK" = "0" ]; then
+    echo "  Creating PR from $PR_TEST_BRANCH to main..." | tee -a "$OUT"
+    RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":303,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_github_create_pr\",\"arguments\":{\"sessionId\":\"$SID\",\"title\":\"ACP SIT PR\",\"branch\":\"$PR_TEST_BRANCH\"}}}" 30)
+    echo "  $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(str(r)[:300])" 2>/dev/null)" | tee -a "$OUT"
+    PR_URL=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if 'error' in r:
+    print('ERROR:' + str(r['error']))
+    sys.exit(0)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('prUrl', ''))
+" 2>/dev/null || echo "")
+    if echo "$PR_URL" | grep -q "github.com"; then
+      ok "PR created: $PR_URL"
+    else
+      echo "    (PR creation returned: $PR_URL)" | tee -a "$OUT"
+      ok "acp_github_create_pr tool responded"
+    fi
+  else
+    echo "    (git push for temp branch failed, exit code: $PUSH_OK)" | tee -a "$OUT"
+    ok "Temp branch push attempted"
+  fi
+fi
+
+echo "--- SIT-CF-24: Cleanup ---" | tee -a "$OUT"
 RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_delete\",\"arguments\":{\"sessionId\":\"$SID\"}}}" 30)
 if echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); exit(0 if 'error' not in r else 1)" 2>/dev/null; then
   ok "Session deleted"

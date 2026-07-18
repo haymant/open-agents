@@ -28,7 +28,11 @@ import {
   provisionCoolifyWorkspace,
   deprovisionCoolifyWorkspace,
 } from "@/lib/sandbox/coolify-workspace";
-import { startCoolifyApplication } from "@/lib/sandbox/coolify-api";
+import {
+  startCoolifyApplication,
+  bulkUpdateCoolifyApplicationEnvs,
+  getCoolifyApplicationEnvs,
+} from "@/lib/sandbox/coolify-api";
 import { getCoolifyConnectorConfig } from "@/lib/sandbox/coolify-connector";
 
 export const runtime = "nodejs";
@@ -652,6 +656,425 @@ const sandboxOps: SandboxOps = {
       console.error("[acpmcp] LLM prompt failed:", msg);
       return `LLM error: ${msg}`;
     }
+  },
+
+  async setSecrets(
+    sessionId: string,
+    envVars: Record<string, string>,
+  ): Promise<{ stored: number }> {
+    const record = await getSessionById(sessionId);
+    if (!record) throw new Error("Session not found");
+    const sandboxState = record.sandboxState as CoolifyState | null;
+    if (!sandboxState?.coolifyApplicationId || !sandboxState.connectorConfigId)
+      throw new Error("No Coolify app for this session");
+
+    const config = getCoolifyConnectorConfig(sandboxState.connectorConfigId);
+    if (!config) throw new Error("Connector config not found");
+
+    const apiConfig = {
+      apiToken: config.apiToken,
+      baseUrl: config.baseUrl,
+    };
+
+    let stored = 0;
+    const envPayload = Object.entries(envVars).map(([key, value]) => ({
+      key,
+      value,
+      isLiteral: true,
+      isRuntime: true,
+      isBuildtime: false,
+      isMultiline: false,
+      isPreview: false,
+    }));
+    await bulkUpdateCoolifyApplicationEnvs(
+      apiConfig,
+      sandboxState.coolifyApplicationId,
+      envPayload,
+    );
+    stored = envPayload.length;
+    return { stored };
+  },
+
+  async listSecrets(sessionId: string): Promise<Array<{ name: string }>> {
+    const record = await getSessionById(sessionId);
+    if (!record) return [];
+    const sandboxState = record.sandboxState as CoolifyState | null;
+    if (!sandboxState?.coolifyApplicationId || !sandboxState.connectorConfigId)
+      return [];
+
+    const config = getCoolifyConnectorConfig(sandboxState.connectorConfigId);
+    if (!config) return [];
+
+    const apiConfig = {
+      apiToken: config.apiToken,
+      baseUrl: config.baseUrl,
+    };
+
+    const envs = await getCoolifyApplicationEnvs(
+      apiConfig,
+      sandboxState.coolifyApplicationId,
+    );
+    return envs.map((e) => ({ name: e.key }));
+  },
+
+  async deleteSecret(sessionId: string, name: string): Promise<void> {
+    const record = await getSessionById(sessionId);
+    if (!record) return;
+    const sandboxState = record.sandboxState as CoolifyState | null;
+    if (!sandboxState?.coolifyApplicationId || !sandboxState.connectorConfigId)
+      return;
+
+    const config = getCoolifyConnectorConfig(sandboxState.connectorConfigId);
+    if (!config) return;
+
+    const apiConfig = {
+      apiToken: config.apiToken,
+      baseUrl: config.baseUrl,
+    };
+
+    // Use PATCH to set env var to empty string (effectively removes it)
+    await bulkUpdateCoolifyApplicationEnvs(
+      apiConfig,
+      sandboxState.coolifyApplicationId,
+      [
+        {
+          key: name,
+          value: "",
+          isLiteral: true,
+          isRuntime: true,
+          isBuildtime: false,
+          isMultiline: false,
+          isPreview: false,
+        },
+      ],
+    );
+    console.log(`[acpmcp] Cleared env var ${name} for session ${sessionId}`);
+  },
+
+  async createRepo(
+    repoName: string,
+    org?: string,
+    isPrivate?: boolean,
+    branch?: string,
+  ): Promise<{ repoUrl: string; cloneUrl: string }> {
+    const userId = await getBridgeUserId();
+    if (!userId) throw new Error("No user configured for bridge");
+    const { getUserGitHubToken } = await import("@/lib/github/token");
+    const token = await getUserGitHubToken(userId);
+    if (!token) {
+      throw new Error(
+        "GitHub account not connected. User must sign in with GitHub first.",
+      );
+    }
+
+    const { Octokit } = await import("@octokit/rest");
+    const octokit = new Octokit({ auth: token });
+
+    // Check if the requested owner is the authenticated user or an org
+    const { data: authenticatedUser } =
+      await octokit.rest.users.getAuthenticated();
+    const isUserOwner =
+      !org || authenticatedUser.login.toLowerCase() === org.toLowerCase();
+
+    // Create repo WITHOUT auto_init so we control the initial branch name
+    const result = isUserOwner
+      ? await octokit.rest.repos.createForAuthenticatedUser({
+          name: repoName,
+          private: isPrivate ?? true,
+          auto_init: false,
+        })
+      : await octokit.rest.repos.createInOrg({
+          org: org!,
+          name: repoName,
+          private: isPrivate ?? true,
+          auto_init: false,
+        });
+
+    const owner = result.data.owner.login;
+    const repo = result.data.name;
+    const targetBranch = branch ?? "main";
+
+    // Create an initial commit on the target branch so the repo has content
+    // and the default branch matches what the session will use.
+    await octokit.rest.repos.createOrUpdateFileContents({
+      owner,
+      repo,
+      path: "README.md",
+      message: "Initial commit",
+      content: Buffer.from(`# ${repoName}\n`).toString("base64"),
+      branch: targetBranch,
+    });
+
+    // Set the default branch so GitHub's HEAD matches
+    await octokit.rest.repos.update({
+      owner,
+      repo,
+      default_branch: targetBranch,
+      name: repo,
+    });
+
+    return {
+      repoUrl: result.data.html_url,
+      cloneUrl: `${result.data.html_url}.git`,
+    };
+  },
+
+  async attachRepo(
+    sessionId: string,
+    repoUrl: string,
+    branch?: string,
+  ): Promise<{ status: string; cwd: string }> {
+    const record = await getSessionById(sessionId);
+    if (!record) throw new Error("Session not found");
+    const sandboxState = record.sandboxState as CoolifyState | null;
+    if (!sandboxState) throw new Error("No sandbox state for this session");
+
+    // Parse owner/repo from URL: https://github.com/owner/repo or https://github.com/owner/repo.git
+    const urlPath = repoUrl.replace(/\.git$/, "").replace(/\/$/, "");
+    const parts = urlPath.split("/");
+    const repoOwner = parts.length >= 4 ? parts[parts.length - 2] : undefined;
+    const repoName = parts.length >= 4 ? parts[parts.length - 1] : undefined;
+
+    // Update sandboxState with source so CoolifySandbox.connect() clones the repo
+    sandboxState.source = { repo: repoUrl, branch: branch ?? "main" };
+    await updateSession(sessionId, {
+      sandboxState: sandboxState as unknown as SandboxState,
+      repoOwner: repoOwner ?? null,
+      repoName: repoName ?? null,
+      cloneUrl: repoUrl,
+      branch: branch ?? "main",
+    });
+    return { status: "attached", cwd: "/workspace" };
+  },
+
+  async gitPush(
+    sessionId: string,
+    _message?: string,
+  ): Promise<{
+    success: boolean;
+    branch?: string;
+    pushedToNewBranch?: boolean;
+  }> {
+    const record = await getSessionById(sessionId);
+    if (!record) throw new Error("Session not found");
+    const sandboxState = record.sandboxState as CoolifyState | null;
+    if (!sandboxState) throw new Error("No sandbox state");
+
+    const cloneUrl = (record as Record<string, unknown>).cloneUrl as
+      | string
+      | undefined;
+    if (!cloneUrl)
+      throw new Error(
+        "No repo URL associated with this session. Use acp_github_attach_repo first.",
+      );
+
+    const userId = await getBridgeUserId();
+    if (!userId) throw new Error("No user configured for bridge");
+    const { getUserGitHubToken } = await import("@/lib/github/token");
+    const token = await getUserGitHubToken(userId);
+    if (!token) {
+      throw new Error(
+        "GitHub account not connected. User must sign in with GitHub first.",
+      );
+    }
+
+    const authedUrl = cloneUrl.replace("https://", `https://oauth2:${token}@`);
+    const branch =
+      ((record as Record<string, unknown>).branch as string) ?? "main";
+
+    if (sandboxState.type === "coolify") {
+      const sandbox = await connectCoolify(sandboxState);
+      try {
+        const runCommands = (cmds: string[]) =>
+          sandbox.exec(cmds.join(" && "), "/workspace", 60_000);
+
+        // Step 1: setup remote, fetch, checkout, stage
+        const setup = [
+          `cd /workspace`,
+          `git config user.name "ACP Bridge"`,
+          `git config user.email "acp@open-agents.dev"`,
+          `git remote remove origin 2>/dev/null; git remote add origin ${authedUrl}`,
+          `git fetch origin ${branch}`,
+          `git checkout -B ${branch}`,
+          `git add -A`,
+        ];
+        const setupResult = await runCommands(setup);
+        if (setupResult.exitCode !== 0) {
+          throw new Error(
+            `Git setup failed:\n${(setupResult.stderr || "") + (setupResult.stdout || "")}`,
+          );
+        }
+
+        // Step 2: pull --rebase
+        const pullResult = await sandbox.exec(
+          `cd /workspace && git pull --rebase origin ${branch} 2>&1`,
+          "/workspace",
+          60_000,
+        );
+        const pullOutput =
+          (pullResult.stderr || "") + (pullResult.stdout || "");
+
+        if (pullResult.exitCode !== 0) {
+          const hasConflict =
+            pullOutput.includes("CONFLICT") ||
+            pullOutput.includes("conflict") ||
+            pullOutput.includes("unborn branch");
+
+          // Fallback: abort rebase, reset current branch to FETCH_HEAD
+          // (preserving working tree and staged changes), commit, then push
+          // HEAD to a new remote branch.
+          const pushFallback = async (reason: string) => {
+            const timestamp = Date.now();
+            const tempBranch = `acp-push-${timestamp}`;
+            const fallbackCmds = [
+              `cd /workspace`,
+              `git rebase --abort 2>/dev/null || true`,
+              `git fetch origin HEAD 2>/dev/null || true`,
+              `git reset --soft FETCH_HEAD 2>/dev/null || true`,
+              `git add -A`,
+              `git diff --cached --quiet || git commit -m "acp: staged changes"`,
+              `git push origin HEAD:refs/heads/${tempBranch} 2>&1`,
+            ].join(" && ");
+
+            const tempResult = await sandbox.exec(
+              fallbackCmds,
+              "/workspace",
+              60_000,
+            );
+            if (tempResult.exitCode !== 0) {
+              const tempOut =
+                (tempResult.stderr || "") + (tempResult.stdout || "");
+              throw new Error(
+                `${reason} — fallback push to ${tempBranch} also failed:\n${tempOut.slice(0, 2000)}`,
+              );
+            }
+            return {
+              success: true,
+              branch: tempBranch,
+              pushedToNewBranch: true,
+            };
+          };
+
+          if (hasConflict) {
+            return pushFallback("Merge conflict or unborn branch");
+          }
+
+          // Not a conflict — real error
+          console.warn(`[acpmcp] git pull --rebase failed:`, pullOutput);
+          throw new Error(`Git pull failed:\n${pullOutput.slice(0, 2000)}`);
+        }
+
+        // Step 3: push (pull succeeded)
+        const pushResult = await sandbox.exec(
+          `cd /workspace && git push origin ${branch} 2>&1`,
+          "/workspace",
+          60_000,
+        );
+        const pushOutput =
+          (pushResult.stderr || "") + (pushResult.stdout || "");
+        if (pushResult.exitCode !== 0) {
+          // Push rejected (diverged) — fallback to temp branch
+          const hasRejected =
+            pushOutput.includes("[rejected]") ||
+            pushOutput.includes("non-fast-forward");
+          if (hasRejected) {
+            // Fallback: fetch origin, reset to FETCH_HEAD, commit, push HEAD
+            // to a new remote branch.
+            const timestamp = Date.now();
+            const tempBranch = `acp-push-${timestamp}`;
+            const tempResult = await sandbox.exec(
+              [
+                `cd /workspace`,
+                `git fetch origin ${branch} 2>&1`,
+                `git reset --soft FETCH_HEAD 2>/dev/null || true`,
+                `git add -A`,
+                `git diff --cached --quiet || git commit -m "acp: staged changes"`,
+                `git push origin HEAD:refs/heads/${tempBranch} 2>&1`,
+              ].join(" && "),
+              "/workspace",
+              60_000,
+            );
+            if (tempResult.exitCode !== 0) {
+              const tempOut =
+                (tempResult.stderr || "") + (tempResult.stdout || "");
+              console.warn(
+                `[acpmcp] fallback push to ${tempBranch} also failed:`,
+                tempOut,
+              );
+              throw new Error(
+                `Push rejected and fallback to ${tempBranch} failed:\n${tempOut.slice(0, 2000)}`,
+              );
+            }
+            return {
+              success: true,
+              branch: tempBranch,
+              pushedToNewBranch: true,
+            };
+          }
+          console.warn(`[acpmcp] git push failed:`, pushOutput);
+          throw new Error(`Git push failed:\n${pushOutput.slice(0, 2000)}`);
+        }
+
+        return { success: true, branch };
+      } finally {
+        await sandbox.stop().catch(() => {});
+      }
+    }
+    throw new Error("Can only push from Coolify sandbox");
+  },
+
+  async createPr(
+    sessionId: string,
+    title?: string,
+    base?: string,
+    branch?: string,
+  ): Promise<{ prUrl: string }> {
+    const record = await getSessionById(sessionId);
+    if (!record) throw new Error("Session not found");
+
+    const cloneUrl = (record as Record<string, unknown>).cloneUrl as
+      | string
+      | undefined;
+    if (!cloneUrl)
+      throw new Error("No repo URL. Use acp_github_attach_repo first.");
+
+    // Use explicit branch if provided, otherwise fall back to session's stored branch
+    const headBranch =
+      branch ||
+      ((record as Record<string, unknown>).branch as string | undefined);
+    if (!headBranch)
+      throw new Error("No branch specified and no branch on session record.");
+
+    const userId = await getBridgeUserId();
+    if (!userId) throw new Error("No user configured for bridge");
+    const { getUserGitHubToken } = await import("@/lib/github/token");
+    const token = await getUserGitHubToken(userId);
+    if (!token) {
+      throw new Error("GitHub account not connected.");
+    }
+
+    // Parse owner and repo from clone URL
+    const path = cloneUrl.replace(/\.git$/, "").replace(/\/$/, "");
+    const parts = path.split("/");
+    const owner = parts[parts.length - 2];
+    const repo = parts[parts.length - 1];
+    if (!owner || !repo)
+      throw new Error(`Could not parse owner/repo from ${cloneUrl}`);
+
+    const { Octokit } = await import("@octokit/rest");
+    const octokit = new Octokit({ auth: token });
+    const baseBranch = base ?? "main";
+
+    const response = await octokit.rest.pulls.create({
+      owner,
+      repo,
+      title: title ?? `Changes from ${headBranch}`,
+      body: "Auto-generated by ACP Bridge.",
+      head: headBranch,
+      base: baseBranch,
+    });
+
+    return { prUrl: response.data.html_url };
   },
 };
 

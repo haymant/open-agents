@@ -1,0 +1,1 @@
+coolify app list|grep open-agents- |awk '{print $4}' | while IFS= read -r file; do  yes | coolify app delete "$file"; done
