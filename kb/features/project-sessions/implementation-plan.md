@@ -3,7 +3,7 @@ title: "Project Sessions — Implementation Plan"
 feature_id: "project-sessions"
 artifact: "implementation-plan"
 status: "in-progress"
-version: "2"
+version: "3"
 owner_agent: "Developer"
 parent_feature: "project-sessions"
 last_updated: "2026-07-18"
@@ -213,9 +213,9 @@ Add:
 
 ---
 
-## Phase P4: Session Hierarchy
+## Phase P4: Session Hierarchy ✅
 
-**Goal**: Add session type and parent-child linking.
+**Goal**: Add session type and parent-child linking. **Implemented**.
 
 ### P4.1 DB migration
 

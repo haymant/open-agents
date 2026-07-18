@@ -136,6 +136,8 @@ const dbStore: SessionStore = {
           sandboxState: initialSandboxState as unknown as SandboxState,
           isNewBranch: false,
           globalSkillRefs: [],
+          type: (params.type as "chat" | "project" | "child") ?? "chat",
+          parentSessionId: params.parentSessionId as string | undefined,
         },
         initialChat: {
           id: nanoid(),
@@ -194,6 +196,8 @@ const dbStore: SessionStore = {
         sandboxState: initialSandboxState,
         isNewBranch: false,
         globalSkillRefs: [],
+        type: (params.type as "chat" | "project" | "child") ?? "chat",
+        parentSessionId: params.parentSessionId as string | undefined,
       },
       initialChat: {
         id: nanoid(),
@@ -1138,6 +1142,121 @@ const sandboxOps: SandboxOps = {
     } finally {
       await sandbox.stop().catch(() => {});
     }
+  },
+
+  async getSessionTree(
+    sessionId: string,
+  ): Promise<{
+    session: Record<string, unknown>;
+    children: Array<Record<string, unknown>>;
+  }> {
+    const record = await getSessionById(sessionId);
+    if (!record) throw new Error("Session not found");
+
+    const children = await getSessionsByParentId(sessionId);
+
+    return {
+      session: {
+        id: record.id,
+        title: record.title,
+        status: record.status,
+        type: record.type,
+        createdAt: record.createdAt,
+      },
+      children: children.map((c) => ({
+        id: c.id,
+        title: c.title,
+        status: c.status,
+        type: c.type,
+        createdAt: c.createdAt,
+      })),
+    };
+  },
+
+  async bulkSandboxAction(
+    sessionId: string,
+    action: string,
+  ): Promise<{ affected: number }> {
+    const children = await getSessionsByParentId(sessionId);
+    let affected = 0;
+
+    for (const child of children) {
+      const sandboxState = child.sandboxState as
+        | CoolifyState
+        | null
+        | undefined;
+      if (!sandboxState?.coolifyApplicationId) continue;
+
+      const config = sandboxState.connectorConfigId
+        ? getCoolifyConnectorConfig(sandboxState.connectorConfigId)
+        : undefined;
+      const apiConfig = config
+        ? { apiToken: config.apiToken, baseUrl: config.baseUrl }
+        : undefined;
+
+      switch (action) {
+        case "pause":
+          if (apiConfig) {
+            try {
+              const { stopCoolifyApplication } = await import(
+                "@/lib/sandbox/coolify-api"
+              );
+              await stopCoolifyApplication(
+                apiConfig,
+                sandboxState.coolifyApplicationId,
+              );
+              await updateSession(child.id, { status: "archived" });
+              affected++;
+            } catch {
+              // skip failed
+            }
+          }
+          break;
+        case "resume":
+          if (apiConfig) {
+            try {
+              const { startCoolifyApplication } = await import(
+                "@/lib/sandbox/coolify-api"
+              );
+              await startCoolifyApplication(
+                apiConfig,
+                sandboxState.coolifyApplicationId,
+              );
+              await updateSession(child.id, { status: "running" });
+              affected++;
+            } catch {
+              // skip failed
+            }
+          }
+          break;
+        case "delete":
+          try {
+            if (apiConfig && sandboxState.coolifyApplicationId) {
+              const { stopCoolifyApplication } = await import(
+                "@/lib/sandbox/coolify-api"
+              );
+              await stopCoolifyApplication(
+                apiConfig,
+                sandboxState.coolifyApplicationId,
+              ).catch(() => {});
+            }
+            await updateSession(child.id, { status: "archived" });
+            affected++;
+          } catch {
+            // skip failed
+          }
+          break;
+      }
+    }
+
+    // Also handle the parent session
+    if (action === "delete" || action === "pause") {
+      await updateSession(sessionId, { status: "archived" }).catch(() => {});
+    } else if (action === "resume") {
+      await updateSession(sessionId, { status: "running" }).catch(() => {});
+    }
+
+    return { affected };
   },
 };
 

@@ -147,6 +147,11 @@ export const sessions = pgTable(
     vercelTeamSlug: text("vercel_team_slug"),
     // Whether this session uses a new auto-generated branch
     isNewBranch: boolean("is_new_branch").default(false).notNull(),
+    // Session type for hierarchy support
+    type: text("type", { enum: ["chat", "project", "child"] })
+      .default("chat")
+      .notNull(),
+    parentSessionId: text("parent_session_id").references(() => sessions.id),
     // Optional per-session override for auto commit + push behavior.
     // null means "use the user's default preference".
     autoCommitPushOverride: boolean("auto_commit_push_override"),

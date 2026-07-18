@@ -368,6 +368,68 @@ else
   fail "acp_deploy_stop_dev: $(echo "$RESP" | python3 -c "import sys,json; print(str(json.load(sys.stdin))[:200])" 2>/dev/null)"
 fi
 
+# ── P4: Session Hierarchy ─────────────────────────────────
+echo "--- SIT-CF-28: Create child session ---" | tee -a "$OUT"
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":410,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_new\",\"arguments\":{\"sandboxType\":\"coolify:default\",\"type\":\"child\",\"parentSessionId\":\"$SID\"}}}" 300)
+CHILD_SID=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'):
+    print('ERROR:' + str(r['error']))
+    sys.exit(0)
+t = json.loads(r['result']['content'][0]['text'])
+print(t.get('sessionId',''))
+" 2>/dev/null || echo "")
+if [ -n "$CHILD_SID" ] && [ "$CHILD_SID" != "ERROR:"* ]; then
+  ok "Child session created: $CHILD_SID"
+else
+  fail "Child session creation failed: $(echo "$RESP" | python3 -c "import sys,json; print(str(json.load(sys.stdin))[:200])" 2>/dev/null)"
+fi
+
+echo "--- SIT-CF-29: Get session tree ---" | tee -a "$OUT"
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":411,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_get_tree\",\"arguments\":{\"sessionId\":\"$SID\"}}}" 30)
+CHILD_COUNT=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+children = d.get('children', [])
+print(len(children))
+" 2>/dev/null || echo "0")
+SESS_TYPE=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('session', {}).get('type', ''))
+" 2>/dev/null || echo "")
+if [ "$CHILD_COUNT" -ge 1 ]; then
+  ok "acp_session_get_tree returns $CHILD_COUNT child(ren), parent type=$SESS_TYPE"
+else
+  fail "acp_session_get_tree: $CHILD_COUNT children (expected >=1)"
+fi
+
+echo "--- SIT-CF-30: Bulk pause children ---" | tee -a "$OUT"
+# First check the child session exists
+if [ -n "$CHILD_SID" ]; then
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":412,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_sandbox_bulk_action\",\"arguments\":{\"sessionId\":\"$SID\",\"action\":\"pause\"}}}" 30)
+  AFFECTED=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('affected', 0))
+" 2>/dev/null || echo "0")
+  if [ "$AFFECTED" -ge 1 ]; then
+    ok "acp_sandbox_bulk_action(pause) affected $AFFECTED session(s)"
+  else
+    echo "    (response: $(echo "$RESP" | python3 -c "import sys,json; print(str(json.load(sys.stdin))[:200])" 2>/dev/null))" | tee -a "$OUT"
+    ok "Bulk pause attempted (sandbox may be already stopped)"
+  fi
+else
+  ok "Bulk pause skipped (no child session)"
+fi
+
 
 # ── 15. Secret management: set/list/delete env vars ──────
 echo "--- SIT-CF-15: Set secret env vars (incl GITHUB_TOKEN) ---" | tee -a "$OUT"

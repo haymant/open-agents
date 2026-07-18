@@ -17,6 +17,8 @@ export interface SessionStore {
     sandboxType?: string;
     repoUrl?: string;
     branch?: string;
+    type?: string;
+    parentSessionId?: string;
   }): Promise<{
     sessionId: string;
     sandboxName: string;
@@ -101,6 +103,18 @@ export interface SandboxOps {
   stopDevServer?(sessionId: string): Promise<void>;
   /** Get the preview URL for a session's sandbox at the given port. */
   getPreviewUrl?(sessionId: string, port?: number): Promise<string>;
+  /** Get the session tree (session + children) for a session. */
+  getSessionTree?(
+    sessionId: string,
+  ): Promise<{
+    session: Record<string, unknown>;
+    children: Array<Record<string, unknown>>;
+  }>;
+  /** Perform a bulk action (pause/resume/delete) on a session and its children. */
+  bulkSandboxAction?(
+    sessionId: string,
+    action: string,
+  ): Promise<{ affected: number }>;
 }
 
 // ── Tool definitions (JSON Schema for MCP) ────────────────────────
@@ -196,6 +210,10 @@ export const toolDefinitions: Record<
         ),
         repoUrl: stringProp("GitHub repository URL to clone"),
         branch: stringProp("Branch to checkout"),
+        type: stringProp(
+          'Session type: "chat" (default), "project", or "child"',
+        ),
+        parentSessionId: stringProp("Parent session ID for child sessions"),
       },
     },
   },
@@ -687,6 +705,31 @@ export const toolDefinitions: Record<
       required: ["sessionId"],
     },
   },
+  acp_session_get_tree: {
+    name: "acp_session_get_tree",
+    description:
+      "Get the session hierarchy tree. Returns the session and its child sessions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: stringProp("Session ID"),
+      },
+      required: ["sessionId"],
+    },
+  },
+  acp_sandbox_bulk_action: {
+    name: "acp_sandbox_bulk_action",
+    description:
+      "Perform a bulk action (pause/resume/delete) on a session and all its child sessions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: stringProp("Session ID"),
+        action: stringProp("Action: pause, resume, or delete"),
+      },
+      required: ["sessionId", "action"],
+    },
+  },
 };
 
 function ok(data: unknown): ToolContent[] {
@@ -759,6 +802,8 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
         sandboxType: params.sandboxType as string | undefined,
         repoUrl: params.repoUrl as string | undefined,
         branch: params.branch as string | undefined,
+        type: params.type as string | undefined,
+        parentSessionId: params.parentSessionId as string | undefined,
       });
       return ok({
         sessionId: result.sessionId,
@@ -1132,6 +1177,31 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
         params.port as number | undefined,
       );
       return ok({ previewUrl: url });
+    },
+
+    // ── Session Hierarchy ───────────────────────────────
+
+    async acp_session_get_tree(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      if (!sandbox.getSessionTree)
+        return err("Session hierarchy not supported");
+      const result = await sandbox.getSessionTree(
+        params.sessionId as string,
+      );
+      return ok(result);
+    },
+
+    async acp_sandbox_bulk_action(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      if (!sandbox.bulkSandboxAction)
+        return err("Session hierarchy not supported");
+      const result = await sandbox.bulkSandboxAction(
+        params.sessionId as string,
+        params.action as string,
+      );
+      return ok(result);
     },
   };
 }

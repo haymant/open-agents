@@ -153,6 +153,17 @@ export async function getSessionsByUserId(userId: string) {
   return records.map((session) => normalizeSessionRecord(session));
 }
 
+export async function getSessionsByParentId(
+  parentSessionId: string,
+): Promise<SessionRecord[]> {
+  const records = await db.query.sessions.findMany({
+    where: eq(sessions.parentSessionId, parentSessionId),
+    orderBy: [desc(sessions.createdAt)],
+  });
+
+  return records.map((session) => normalizeSessionRecord(session));
+}
+
 export async function countSessionsByUserId(userId: string): Promise<number> {
   const [result] = await db
     .select({ count: sql<number>`COUNT(*)::int` })
