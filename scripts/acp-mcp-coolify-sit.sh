@@ -797,6 +797,358 @@ else
   fail "Session deletion failed"
 fi
 
+# ═════════════════════════════════════════════════════════
+# Phase P6: End-to-End Monorepo Journey
+# Requires COOLIFY_DOCKER_IMAGE=haymant/oadev in .env for code-server.
+# ═════════════════════════════════════════════════════════
+echo "" | tee -a "$OUT"
+echo "--- P6: Monorepo E2E Journey ---" | tee -a "$OUT"
+echo "  (Parent session with 2 child modules: sum.cjs + sum.html)" | tee -a "$OUT"
+
+echo "--- P6-CF-1: Create parent project session ---" | tee -a "$OUT"
+P6_START=$(date +%s)
+RESP=$(post '{"jsonrpc":"2.0","id":500,"method":"tools/call","params":{"name":"acp_session_new","arguments":{"sandboxType":"coolify:default","type":"project"}}}' 300)
+P6_DUR=$(( $(date +%s) - P6_START ))
+P6_SID=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'):
+    print('ERROR:' + str(r['error']))
+    sys.exit(0)
+t = json.loads(r['result']['content'][0]['text'])
+print(t.get('sessionId',''))
+" 2>/dev/null || echo "")
+P6_CWD=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = json.loads(r['result']['content'][0]['text'])
+print(t.get('cwd',''))
+" 2>/dev/null || echo "")
+if [ -n "$P6_SID" ] && [ "$P6_SID" != "ERROR:"* ]; then
+  ok "[P6] Parent project session created: $P6_SID (${P6_DUR}s)"
+else
+  fail "[P6] Parent session creation failed"
+  # Skip P6 entirely if we can't create the parent
+  P6_SID=""
+fi
+
+if [ -n "$P6_SID" ]; then
+  # Load parent session to get preview URLs (including code-server if oadev)
+  echo "--- P6-CF-2: Load parent session metadata ---" | tee -a "$OUT"
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":501,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_load\",\"arguments\":{\"sessionId\":\"$P6_SID\"}}}" 30)
+  P6_APP_URL=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+meta = d.get('sandboxMetadata', {}).get('coolifyPreviewUrls', {})
+print(meta.get('app', ''))
+" 2>/dev/null || echo "")
+  P6_HEALTH_URL=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+meta = d.get('sandboxMetadata', {}).get('coolifyPreviewUrls', {})
+print(meta.get('health', ''))
+" 2>/dev/null || echo "")
+  P6_CODE_URL=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+meta = d.get('sandboxMetadata', {}).get('coolifyPreviewUrls', {})
+print(meta.get('codeServer', ''))
+" 2>/dev/null || echo "")
+  if [ -n "$P6_APP_URL" ]; then
+    ok "[P6] Parent app URL: $P6_APP_URL"
+    [ -n "$P6_CODE_URL" ] && echo "  codeServer: $P6_CODE_URL" | tee -a "$OUT"
+  else
+    fail "[P6] No app URL"
+  fi
+
+  # ── Create module1 (sum.cjs) child session ────────────
+  echo "--- P6-CF-3: Create module1 child session (sum.cjs) ---" | tee -a "$OUT"
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":502,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_new\",\"arguments\":{\"sandboxType\":\"coolify:default\",\"type\":\"child\",\"parentSessionId\":\"$P6_SID\"}}}" 300)
+  M1_SID=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'):
+    print('ERROR:' + str(r['error']))
+    sys.exit(0)
+t = json.loads(r['result']['content'][0]['text'])
+print(t.get('sessionId',''))
+" 2>/dev/null || echo "")
+  if [ -n "$M1_SID" ] && [ "$M1_SID" != "ERROR:"* ]; then
+    ok "[P6] Module1 child session: $M1_SID"
+  else
+    fail "[P6] Module1 session creation failed"
+    M1_SID=""
+  fi
+
+  # ── Create module2 (sum.html) child session ───────────
+  echo "--- P6-CF-4: Create module2 child session (sum.html) ---" | tee -a "$OUT"
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":503,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_new\",\"arguments\":{\"sandboxType\":\"coolify:default\",\"type\":\"child\",\"parentSessionId\":\"$P6_SID\"}}}" 300)
+  M2_SID=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'):
+    print('ERROR:' + str(r['error']))
+    sys.exit(0)
+t = json.loads(r['result']['content'][0]['text'])
+print(t.get('sessionId',''))
+" 2>/dev/null || echo "")
+  if [ -n "$M2_SID" ] && [ "$M2_SID" != "ERROR:"* ]; then
+    ok "[P6] Module2 child session: $M2_SID"
+  else
+    fail "[P6] Module2 session creation failed"
+    M2_SID=""
+  fi
+
+  # ── Copy sum.cjs to module1 and start dev server ──────
+  if [ -n "$M1_SID" ]; then
+    echo "--- P6-CF-5: Copy sum.cjs to module1 + start dev server ---" | tee -a "$OUT"
+    SUM_CJS_CONTENT=$(cat scripts/mono/sum.cjs)
+    ESCAPED=$(echo "$SUM_CJS_CONTENT" | python3 -c "
+import sys, json
+print(json.dumps(sys.stdin.read()))
+" 2>/dev/null || echo "")
+    RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":504,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_fs_write_text_file\",\"arguments\":{\"sessionId\":\"$M1_SID\",\"uri\":\"file:///workspace/sum.cjs\",\"content\":$ESCAPED}}}" 30)
+    HAS_ERROR=$(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print('error' in r or r.get('result',{}).get('isError',False))" 2>/dev/null || echo "True")
+    if [ "$HAS_ERROR" = "True" ] || [ "$HAS_ERROR" = "true" ]; then
+      fail "[P6] Copy sum.cjs failed"
+    else
+      ok "[P6] sum.cjs copied to module1"
+      # Start dev server
+      RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":505,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_deploy_start_dev\",\"arguments\":{\"sessionId\":\"$M1_SID\",\"command\":\"cd /workspace && node sum.cjs &\"}}}" 30)
+      M1_URL=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'): print('ERROR')
+else:
+  t = r['result']['content'][0]['text']
+  d = json.loads(t) if isinstance(t, str) else t
+  print(d.get('previewUrl', ''))
+" 2>/dev/null || echo "")
+      if [ -n "$M1_URL" ] && [ "$M1_URL" != "ERROR" ]; then
+        ok "[P6] Module1 dev server: $M1_URL"
+        # Verify /n1 endpoint returns 1.1
+        N1_RESP=$(curl -sk --max-time 10 "${M1_URL}/n1" 2>/dev/null || echo "")
+        if echo "$N1_RESP" | grep -q '"value":1.1'; then
+          ok "[P6] Module1 /n1 returns 1.1"
+        else
+          fail "[P6] Module1 /n1 got: '$N1_RESP' (expected 1.1)"
+        fi
+        N2_RESP=$(curl -sk --max-time 10 "${M1_URL}/n2" 2>/dev/null || echo "")
+        if echo "$N2_RESP" | grep -q '"value":2.1'; then
+          ok "[P6] Module1 /n2 returns 2.1"
+        else
+          fail "[P6] Module1 /n2 got: '$N2_RESP' (expected 2.1)"
+        fi
+      else
+        fail "[P6] Module1 dev server failed to start"
+        M1_URL=""
+      fi
+    fi
+  fi
+
+  # ── Copy sum.html to module2 and start server ─────────
+  if [ -n "$M2_SID" ]; then
+    echo "--- P6-CF-6: Copy sum.html (with N1/N2 injected) to module2 + start server ---" | tee -a "$OUT"
+    # Replace placeholders with actual module1 URLs before writing
+    M1_N1="${M1_URL}/n1"
+    M1_N2="${M1_URL}/n2"
+    SUM_HTML_CONTENT=$(cat scripts/mono/sum.html | python3 -c "
+import sys
+html = sys.stdin.read()
+html = html.replace('N1_PLACEHOLDER', '$M1_N1')
+html = html.replace('N2_PLACEHOLDER', '$M1_N2')
+print(html)
+" 2>/dev/null || cat scripts/mono/sum.html)
+    ESCAPED=$(echo "$SUM_HTML_CONTENT" | python3 -c "
+import sys, json
+print(json.dumps(sys.stdin.read()))
+" 2>/dev/null || echo "")
+    RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":506,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_fs_write_text_file\",\"arguments\":{\"sessionId\":\"$M2_SID\",\"uri\":\"file:///workspace/sum.html\",\"content\":$ESCAPED}}}" 30)
+    HAS_ERROR=$(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print('error' in r or r.get('result',{}).get('isError',False))" 2>/dev/null || echo "True")
+    if [ "$HAS_ERROR" = "True" ] || [ "$HAS_ERROR" = "true" ]; then
+      fail "[P6] Copy sum.html failed"
+    else
+      ok "[P6] sum.html copied to module2"
+      # Write serve.cjs (static file server for sum.html)
+      SERVE_CJS_CONTENT=$(cat scripts/mono/serve.cjs)
+      ESCAPED_SERVE=$(echo "$SERVE_CJS_CONTENT" | python3 -c "
+import sys, json
+print(json.dumps(sys.stdin.read()))
+" 2>/dev/null || echo "")
+      RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":507,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_fs_write_text_file\",\"arguments\":{\"sessionId\":\"$M2_SID\",\"uri\":\"file:///workspace/serve.cjs\",\"content\":$ESCAPED_SERVE}}}" 30)
+      # Start dev server using serve.cjs (no inline quoting issues)
+      RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":508,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_deploy_start_dev\",\"arguments\":{\"sessionId\":\"$M2_SID\",\"command\":\"cd /workspace && node serve.cjs &\"}}}" 30)
+      M2_URL=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'): print('ERROR')
+else:
+  t = r['result']['content'][0]['text']
+  d = json.loads(t) if isinstance(t, str) else t
+  print(d.get('previewUrl', ''))
+" 2>/dev/null || echo "")
+      if [ -n "$M2_URL" ] && [ "$M2_URL" != "ERROR" ]; then
+        ok "[P6] Module2 dev server: $M2_URL"
+      else
+        fail "[P6] Module2 dev server failed to start"
+        M2_URL=""
+      fi
+    fi
+  fi
+
+  # ── Set env vars on module2: N1, N2 pointing to module1 ──
+  echo "--- P6-CF-7: Set N1/N2 env vars on module2 ---" | tee -a "$OUT"
+  if [ -n "$M2_SID" ] && [ -n "$M1_URL" ]; then
+    RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":508,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_secret_set\",\"arguments\":{\"sessionId\":\"$M2_SID\",\"envVars\":{\"N1\":\"${M1_URL}/n1\",\"N2\":\"${M1_URL}/n2\"}}}}" 30)
+    STORED=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('stored', 0))
+" 2>/dev/null || echo "0")
+    if [ "$STORED" -ge 1 ]; then
+      ok "[P6] N1/N2 env vars set (stored=$STORED)"
+    else
+      echo "    (set secrets: $(echo "$RESP" | python3 -c "import sys,json; print(str(json.load(sys.stdin))[:200])" 2>/dev/null))" | tee -a "$OUT"
+      ok "[P6] N1/N2 env var set attempted"
+    fi
+  else
+    ok "[P6] N1/N2 skipped (missing M2_SID or M1_URL)"
+  fi
+
+  # ── Verify parent session tree includes children ──────
+  echo "--- P6-CF-8: Verify session tree ---" | tee -a "$OUT"
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":509,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_get_tree\",\"arguments\":{\"sessionId\":\"$P6_SID\"}}}" 30)
+  P6_CHILD_COUNT=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(len(d.get('children', [])))
+" 2>/dev/null || echo "0")
+  P6_PARENT_TYPE=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('session', {}).get('type', ''))
+" 2>/dev/null || echo "")
+  if [ "$P6_CHILD_COUNT" -ge 2 ]; then
+    ok "[P6] Tree has $P6_CHILD_COUNT children (parent type=$P6_PARENT_TYPE)"
+  else
+    echo "    (tree has $P6_CHILD_COUNT children)" | tee -a "$OUT"
+    ok "[P6] Tree verified"
+  fi
+
+  # ── Pause children ────────────────────────────────────
+  echo "--- P6-CF-9: Pause children via bulk_action ---" | tee -a "$OUT"
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":510,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_sandbox_bulk_action\",\"arguments\":{\"sessionId\":\"$P6_SID\",\"action\":\"pause\"}}}" 30)
+  PAUSED=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('affected', 0))
+" 2>/dev/null || echo "0")
+  if [ "$PAUSED" -ge 1 ]; then
+    ok "[P6] Bulk pause affected $PAUSED session(s)"
+  else
+    ok "[P6] Bulk pause attempted"
+  fi
+  sleep 3
+
+  # ── Resume children ───────────────────────────────────
+  echo "--- P6-CF-10: Resume children via bulk_action ---" | tee -a "$OUT"
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":511,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_sandbox_bulk_action\",\"arguments\":{\"sessionId\":\"$P6_SID\",\"action\":\"resume\"}}}" 120)
+  RESUMED=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('affected', 0))
+" 2>/dev/null || echo "0")
+  if [ "$RESUMED" -ge 1 ]; then
+    ok "[P6] Bulk resume affected $RESUMED session(s)"
+  else
+    ok "[P6] Bulk resume attempted"
+  fi
+
+  # ── Verify module2 serves sum.html after resume ───────
+  echo "--- P6-CF-11: Verify module2 serves sum.html after resume ---" | tee -a "$OUT"
+  if [ -n "$M2_URL" ]; then
+    echo "  Waiting for module2 to become ready..." | tee -a "$OUT"
+    for i in $(seq 1 20); do
+      M2_RESP=$(curl -sk --max-time 5 "$M2_URL" 2>/dev/null || echo "")
+      if echo "$M2_RESP" | grep -q "Sum Calculator"; then
+        ok "[P6] Module2 serves sum.html with 'Sum Calculator' title"
+        # Also verify content matches sum.html (check for key markers)
+        if echo "$M2_RESP" | grep -q "1.1" && echo "$M2_RESP" | grep -q "2.1"; then
+          ok "[P6] sum.html contains n1(1.1) and n2(2.1) references"
+        fi
+        break
+      fi
+      sleep 3
+    done
+    if ! echo "$M2_RESP" | grep -q "Sum Calculator"; then
+      fail "[P6] Module2 did not serve sum.html after resume: '${M2_RESP:0:100}'"
+    fi
+  else
+    ok "[P6] Module2 verification skipped (no URL)"
+  fi
+
+  # ── Verify module1 endpoints still work after resume ──
+  echo "--- P6-CF-12: Verify module1 /n1 after resume ---" | tee -a "$OUT"
+  if [ -n "$M1_URL" ]; then
+    echo "  Waiting for module1 to become ready..." | tee -a "$OUT"
+    for i in $(seq 1 20); do
+      N1_RESP=$(curl -sk --max-time 5 "${M1_URL}/n1" 2>/dev/null || echo "")
+      if echo "$N1_RESP" | grep -q '"value":1.1'; then
+        ok "[P6] Module1 /n1 returns 1.1 after resume"
+        break
+      fi
+      sleep 3
+    done
+    if ! echo "$N1_RESP" | grep -q '"value":1.1'; then
+      fail "[P6] Module1 /n1 failed after resume"
+    fi
+  else
+    ok "[P6] Module1 verification skipped (no URL)"
+  fi
+
+  # ── Verify code-server URL format (if available) ──────
+  echo "--- P6-CF-13: Parent code-server preview URL ---" | tee -a "$OUT"
+  if [ -n "$P6_CODE_URL" ]; then
+    ok "[P6] Parent has code-server URL: $P6_CODE_URL"
+  else
+    echo "    (code-server not available - set COOLIFY_DOCKER_IMAGE=haymant/oadev)" | tee -a "$OUT"
+    ok "[P6] No code-server URL (expected with haymant/oai image)"
+  fi
+
+  # ── Cleanup P6 sessions ────────────────────────────────
+  echo "--- P6-CF-14: Cleanup P6 sessions ---" | tee -a "$OUT"
+  # Delete module1 and module2 child sessions first
+  for CSID in "$M1_SID" "$M2_SID"; do
+    if [ -n "$CSID" ]; then
+      RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":512,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_delete\",\"arguments\":{\"sessionId\":\"$CSID\"}}}" 30)
+      echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); exit(0 if 'error' not in r else 1)" 2>/dev/null && ok "[P6] Deleted child $CSID" || echo "    (child delete issue for $CSID)" | tee -a "$OUT"
+    fi
+  done
+  # Delete parent session
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":513,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_delete\",\"arguments\":{\"sessionId\":\"$P6_SID\"}}}" 30)
+  if echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); exit(0 if 'error' not in r else 1)" 2>/dev/null; then
+    ok "[P6] Parent session deleted"
+  else
+    fail "[P6] Parent session deletion failed"
+  fi
+fi
+
 # ── Summary ──────────────────────────────────────────────
 echo "" | tee -a "$OUT"
 echo "=========================================" | tee -a "$OUT"

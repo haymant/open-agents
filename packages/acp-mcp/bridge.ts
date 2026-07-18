@@ -104,9 +104,7 @@ export interface SandboxOps {
   /** Get the preview URL for a session's sandbox at the given port. */
   getPreviewUrl?(sessionId: string, port?: number): Promise<string>;
   /** Get the session tree (session + children) for a session. */
-  getSessionTree?(
-    sessionId: string,
-  ): Promise<{
+  getSessionTree?(sessionId: string): Promise<{
     session: Record<string, unknown>;
     children: Array<Record<string, unknown>>;
   }>;
@@ -1186,9 +1184,7 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
     ): Promise<ToolContent[]> {
       if (!sandbox.getSessionTree)
         return err("Session hierarchy not supported");
-      const result = await sandbox.getSessionTree(
-        params.sessionId as string,
-      );
+      const result = await sandbox.getSessionTree(params.sessionId as string);
       return ok(result);
     },
 

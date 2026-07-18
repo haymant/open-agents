@@ -42,6 +42,8 @@ export interface CoolifyProvisionParams {
   branch?: string;
   /** Port the application listens on inside the container */
   port?: number;
+  /** Override Docker image (e.g., "haymant/oadev" for code-server). Falls back to connector default. */
+  dockerImage?: string;
 }
 
 export interface CoolifyProvisionResult {
@@ -79,11 +81,12 @@ export async function provisionCoolifyWorkspace(
   const appPort = params.port ?? DEFAULT_APP_PORT;
 
   // 1. Create the Coolify Docker-image application
+  const resolvedImage = params.dockerImage ?? config.dockerImage;
   const { applicationUuid, urls } = await createCoolifyDockerImageApplication(
     apiConfig,
     {
       destinationUuid: config.destinationUuid,
-      image: config.dockerImage,
+      image: resolvedImage,
       packagePath: DEFAULT_PACKAGE_PATH,
       port: appPort,
       projectUuid: config.projectUuid,

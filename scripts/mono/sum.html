@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Sum Calculator</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        max-width: 480px;
+        margin: 80px auto;
+        text-align: center;
+      }
+      h1 {
+        font-size: 1.8rem;
+        margin-bottom: 2rem;
+      }
+      .row {
+        display: flex;
+        justify-content: center;
+        gap: 1rem;
+        margin-bottom: 1rem;
+      }
+      .box {
+        background: #f0f0f0;
+        border-radius: 8px;
+        padding: 1rem 2rem;
+        min-width: 100px;
+      }
+      .box .label {
+        font-size: 0.8rem;
+        color: #666;
+      }
+      .box .value {
+        font-size: 1.6rem;
+        font-weight: 700;
+      }
+      .result {
+        font-size: 2rem;
+        font-weight: 700;
+        color: #2b6;
+        margin-top: 1.5rem;
+      }
+      button {
+        font-size: 1rem;
+        padding: 0.5rem 2rem;
+        border: none;
+        border-radius: 6px;
+        background: #2b6;
+        color: #fff;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #1a8;
+      }
+      .error {
+        color: #c33;
+        margin-top: 1rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Sum Calculator</h1>
+    <div class="row">
+      <div class="box">
+        <div class="label">n1</div>
+        <div class="value" id="n1">—</div>
+      </div>
+      <div class="box">
+        <div class="label">n2</div>
+        <div class="value" id="n2">—</div>
+      </div>
+    </div>
+    <div class="result" id="sum">= ?</div>
+    <button onclick="fetchSum()">Calculate</button>
+    <div class="error" id="error"></div>
+    <script>
+      // N1 and N2 are set as env vars pointing to module1's endpoints
+      const N1 = "N1_PLACEHOLDER";
+      const N2 = "N2_PLACEHOLDER";
+
+      async function fetchSum() {
+        const errEl = document.getElementById("error");
+        errEl.textContent = "";
+        try {
+          const [r1, r2] = await Promise.all([
+            fetch(N1).then((r) => r.json()),
+            fetch(N2).then((r) => r.json()),
+          ]);
+          const v1 = r1.value,
+            v2 = r2.value;
+          document.getElementById("n1").textContent = v1;
+          document.getElementById("n2").textContent = v2;
+          document.getElementById("sum").textContent =
+            `${v1} + ${v2} = ${v1 + v2}`;
+        } catch (e) {
+          errEl.textContent = "Error: " + e.message;
+        }
+      }
+      fetchSum();
+    </script>
+  </body>
+</html>

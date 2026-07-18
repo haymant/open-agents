@@ -20,6 +20,7 @@ import {
   createSessionWithInitialChat,
   getSessionById,
   getSessionsByUserId,
+  getSessionsByParentId,
   updateSession,
   createChatMessageIfNotExists,
   getChatsBySessionId,
@@ -149,11 +150,13 @@ const dbStore: SessionStore = {
       // Provision the Coolify workspace
       let sandboxState: CoolifyState;
       try {
+        const isProject = params.type === "project";
         const result = await provisionCoolifyWorkspace({
           connectorId,
           sessionId,
           repoUrl: params.repoUrl,
           branch: params.branch,
+          dockerImage: isProject ? "haymant/oadev" : undefined,
         });
         sandboxState = result.state;
       } catch (error) {
@@ -1144,9 +1147,7 @@ const sandboxOps: SandboxOps = {
     }
   },
 
-  async getSessionTree(
-    sessionId: string,
-  ): Promise<{
+  async getSessionTree(sessionId: string): Promise<{
     session: Record<string, unknown>;
     children: Array<Record<string, unknown>>;
   }> {
@@ -1198,9 +1199,8 @@ const sandboxOps: SandboxOps = {
         case "pause":
           if (apiConfig) {
             try {
-              const { stopCoolifyApplication } = await import(
-                "@/lib/sandbox/coolify-api"
-              );
+              const { stopCoolifyApplication } =
+                await import("@/lib/sandbox/coolify-api");
               await stopCoolifyApplication(
                 apiConfig,
                 sandboxState.coolifyApplicationId,
@@ -1215,9 +1215,8 @@ const sandboxOps: SandboxOps = {
         case "resume":
           if (apiConfig) {
             try {
-              const { startCoolifyApplication } = await import(
-                "@/lib/sandbox/coolify-api"
-              );
+              const { startCoolifyApplication } =
+                await import("@/lib/sandbox/coolify-api");
               await startCoolifyApplication(
                 apiConfig,
                 sandboxState.coolifyApplicationId,
@@ -1232,9 +1231,8 @@ const sandboxOps: SandboxOps = {
         case "delete":
           try {
             if (apiConfig && sandboxState.coolifyApplicationId) {
-              const { stopCoolifyApplication } = await import(
-                "@/lib/sandbox/coolify-api"
-              );
+              const { stopCoolifyApplication } =
+                await import("@/lib/sandbox/coolify-api");
               await stopCoolifyApplication(
                 apiConfig,
                 sandboxState.coolifyApplicationId,
