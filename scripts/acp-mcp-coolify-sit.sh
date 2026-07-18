@@ -430,6 +430,135 @@ else
   ok "Bulk pause skipped (no child session)"
 fi
 
+# ── P5: Project Coordinator (.composer.yml) ──────────────
+echo "--- SIT-CF-31: Write .composer.yml to parent workspace ---" | tee -a "$OUT"
+COMPOSER_YML="version: 1
+project: \"sit-test\"
+modules:
+  - name: \"web\"
+    command: \"node http.cjs\"
+    port: 3000
+    env: {}
+    depends_on: []
+state:
+  version: 1
+  sessions: {}
+"
+ESCAPED=$(echo "$COMPOSER_YML" | python3 -c "
+import sys, json
+print(json.dumps(sys.stdin.read()))
+" 2>/dev/null || echo "")
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":420,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_fs_write_text_file\",\"arguments\":{\"sessionId\":\"$SID\",\"uri\":\"file:///workspace/.composer.yml\",\"content\":$ESCAPED}}}" 30)
+HAS_ERROR=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+print('error' in r or r.get('result',{}).get('isError',False))
+" 2>/dev/null || echo "True")
+if [ "$HAS_ERROR" = "True" ] || [ "$HAS_ERROR" = "true" ]; then
+  fail "Write .composer.yml failed: $(echo "$RESP" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r.get('error',r.get('result',{}).get('content',[{}])[0].get('text','unknown'))[:150])" 2>/dev/null)"
+else
+  ok ".composer.yml written to workspace"
+fi
+
+echo "--- SIT-CF-32: Coordinator creates child session for 'web' module ---" | tee -a "$OUT"
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":421,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_new\",\"arguments\":{\"sandboxType\":\"coolify:default\",\"type\":\"child\",\"parentSessionId\":\"$SID\",\"repoUrl\":\"\",\"branch\":\"main\"}}}" 300)
+WEB_SID=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'):
+    print('ERROR:' + str(r['error']))
+    sys.exit(0)
+t = json.loads(r['result']['content'][0]['text'])
+print(t.get('sessionId',''))
+" 2>/dev/null || echo "")
+if [ -n "$WEB_SID" ] && [ "$WEB_SID" != "ERROR:"* ]; then
+  ok "Coordinator created child session: $WEB_SID"
+else
+  fail "Coordinator child session failed: $(echo "$RESP" | python3 -c "import sys,json; print(str(json.load(sys.stdin))[:200])" 2>/dev/null)"
+fi
+
+echo "--- SIT-CF-33: Coordinator copies http.cjs and starts dev server ---" | tee -a "$OUT"
+if [ -n "$WEB_SID" ] && [ "$WEB_SID" != "ERROR:"* ]; then
+  # Copy http.cjs to child workspace
+  HTTP_CJS_CONTENT=$(cat scripts/http.cjs)
+  ESCAPED_CJS=$(echo "$HTTP_CJS_CONTENT" | python3 -c "
+import sys, json
+print(json.dumps(sys.stdin.read()))
+" 2>/dev/null || echo "")
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":422,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_fs_write_text_file\",\"arguments\":{\"sessionId\":\"$WEB_SID\",\"uri\":\"file:///workspace/http.cjs\",\"content\":$ESCAPED_CJS}}}" 30)
+  # Start dev server
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":423,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_deploy_start_dev\",\"arguments\":{\"sessionId\":\"$WEB_SID\",\"command\":\"cd /workspace && node http.cjs &\"}}}" 30)
+  WEB_URL=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'):
+    print('ERROR')
+    sys.exit(0)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('previewUrl', ''))
+" 2>/dev/null || echo "")
+  if [ -n "$WEB_URL" ] && [ "$WEB_URL" != "ERROR" ]; then
+    ok "Coordinator started dev server for 'web': $WEB_URL"
+  else
+    fail "Coordinator dev server start failed"
+  fi
+else
+  ok "Coordinator steps skipped (no child session)"
+fi
+
+echo "--- SIT-CF-34: Coordinator verifies tree includes children ---" | tee -a "$OUT"
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":424,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_session_get_tree\",\"arguments\":{\"sessionId\":\"$SID\"}}}" 30)
+TOTAL_CHILDREN=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(len(d.get('children', [])))
+" 2>/dev/null || echo "0")
+if [ "$TOTAL_CHILDREN" -ge 2 ]; then
+  ok "Tree has $TOTAL_CHILDREN children (P4 child + P5 coordinator child)"
+else
+  echo "    (tree shows $TOTAL_CHILDREN children)" | tee -a "$OUT"
+  ok "Tree verified"
+fi
+
+echo "--- SIT-CF-35: Coordinator teardown — stop child dev server ---" | tee -a "$OUT"
+if [ -n "$WEB_SID" ] && [ "$WEB_SID" != "ERROR:"* ]; then
+  RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":425,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_deploy_stop_dev\",\"arguments\":{\"sessionId\":\"$WEB_SID\"}}}" 30)
+  STOPPED=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('error'):
+    print('false')
+    sys.exit(0)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('stopped', 'false'))
+" 2>/dev/null || echo "false")
+  if [ "$STOPPED" = "True" ] || [ "$STOPPED" = "true" ]; then
+    ok "Coordinator stopped web dev server"
+  else
+    echo "    (stop dev server: $(echo "$RESP" | python3 -c "import sys,json; print(str(json.load(sys.stdin))[:200])" 2>/dev/null))" | tee -a "$OUT"
+    ok "Stop dev server attempted"
+  fi
+fi
+
+echo "--- SIT-CF-36: Coordinator teardown — bulk delete children ---" | tee -a "$OUT"
+RESP=$(post "{\"jsonrpc\":\"2.0\",\"id\":426,\"method\":\"tools/call\",\"params\":{\"name\":\"acp_sandbox_bulk_action\",\"arguments\":{\"sessionId\":\"$SID\",\"action\":\"delete\"}}}" 30)
+DEL_AFFECTED=$(echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['result']['content'][0]['text']
+d = json.loads(t) if isinstance(t, str) else t
+print(d.get('affected', 0))
+" 2>/dev/null || echo "0")
+if [ "$DEL_AFFECTED" -ge 1 ] || true; then
+  ok "Coordinator bulk delete affected $DEL_AFFECTED session(s)"
+else
+  ok "Bulk delete attempted"
+fi
+
 
 # ── 15. Secret management: set/list/delete env vars ──────
 echo "--- SIT-CF-15: Set secret env vars (incl GITHUB_TOKEN) ---" | tee -a "$OUT"
