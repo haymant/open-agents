@@ -26,6 +26,31 @@ Verify the bridge is alive and see all tools:
 
 You should see ~40+ tools including `acp_session_new`, `acp_deploy_start_dev`, `acp_secret_set`, `acp_session_get_tree`, etc.
 
+The response also includes `activeProvider` and `activeModel` showing the currently configured LLM.
+
+### Switch the LLM model (optional)
+
+Before prompting, you can change which model the agent uses:
+
+```json
+{
+  "method": "tools/call",
+  "jsonrpc": "2.0",
+  "id": 2,
+  "params": {
+    "name": "acp_providers_set",
+    "arguments": {
+      "provider": "deepseek",
+      "config": {
+        "model": "deepseek/deepseek-v4-flash"
+      }
+    }
+  }
+}
+```
+
+Run `tools/list` again afterward to confirm `activeModel` changed.
+
 ---
 
 ## 2. Create parent project session
@@ -168,7 +193,103 @@ Open in browser or curl:
 
 ---
 
-## 9. Write sum.html to module2 (with injected URLs)
+## 9. Prompt the agent in module1's session
+
+Send a prompt to the LLM agent running in module1's sandbox. The agent can use workspace tools (read_file, bash, glob) and respond intelligently:
+
+```json
+{
+  "method": "tools/call",
+  "jsonrpc": "2.0",
+  "id": 65,
+  "params": {
+    "name": "acp_session_prompt",
+    "arguments": {
+      "sessionId": "<MODULE1_SID>",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Read /workspace/sum.cjs and tell me what endpoints it exposes"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+Expected response: the agent reads the file via tools and answers something like *"It exposes /n1 returning 1.1 and /n2 returning 2.1"*.
+
+You can also ask the agent to make changes (single message in `messages` array):
+
+```json
+{
+  "method": "tools/call",
+  "jsonrpc": "2.0",
+  "id": 66,
+  "params": {
+    "name": "acp_session_prompt",
+    "arguments": {
+      "sessionId": "<MODULE1_SID>",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Add a /sum endpoint that reads `a` and `b` from query params and returns their sum as JSON"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+The agent will modify `sum.cjs`, restart the dev server, and confirm the new endpoint works.
+
+### Multi-turn conversation (chat history)
+
+For follow-up prompts, pass the full `messages` array including the assistant's previous response:
+
+```json
+{
+  "method": "tools/call",
+  "jsonrpc": "2.0",
+  "id": 67,
+  "params": {
+    "name": "acp_session_prompt",
+    "arguments": {
+      "sessionId": "<MODULE1_SID>",
+      "messages": [
+        {
+          "role": "user",
+          "content": [{"type": "text", "text": "Read /workspace/sum.cjs and tell me what endpoints it exposes"}]
+        },
+        {
+          "role": "assistant",
+          "content": [{"type": "text", "text": "It exposes /n1 returning 1.1 and /n2 returning 2.1."}]
+        },
+        {
+          "role": "user",
+          "content": [{"type": "text", "text": "Now add a /sum endpoint that reads a and b from query params and returns their sum as JSON"}]
+        }
+      ]
+    }
+  }
+}
+```
+
+The LLM sees the full conversation context — it knows you've already discussed the file, so it can proceed with the change without re-reading.
+
+---
+
+## 10. Write sum.html to module2 (with injected URLs)
 
 **Important**: Replace `N1_PLACEHOLDER` with `M1_URL/n1` and `N2_PLACEHOLDER` with `M1_URL/n2` before writing. The HTML runs in the browser so it needs the absolute URLs baked in.
 

@@ -20,6 +20,13 @@ export type {
   SubagentMessageMetadata,
   SubagentUIMessage,
 } from "./subagents/types";
+// Subagent system prompts (for reuse in acp-mcp bridge)
+export {
+  EXPLORER_SYSTEM_PROMPT,
+  EXECUTOR_SYSTEM_PROMPT,
+  DESIGN_SYSTEM_PROMPT,
+  SUBAGENT_STEP_LIMIT,
+} from "./subagents/index";
 export type { BuildSystemPromptOptions } from "./system-prompt";
 export { buildSystemPrompt } from "./system-prompt";
 export {

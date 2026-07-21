@@ -74,6 +74,23 @@ export async function getSandbox(
   experimental_context: unknown,
   toolName?: string,
 ): Promise<Sandbox> {
+  const ctx = experimental_context as Record<string, unknown> | undefined;
+
+  // If a pre-connected sandbox instance was provided (acp-mcp / Coolify path),
+  // use it directly instead of creating a new connection via connectSandbox.
+  const connected = ctx?.connectedSandbox as Sandbox | undefined;
+  if (connected) {
+    console.log(
+      `[getSandbox] Using connectedSandbox for tool "${toolName ?? "?"}"`,
+    );
+    return connected;
+  }
+
+  console.log(
+    `[getSandbox] No connectedSandbox for tool "${toolName ?? "?"}". ` +
+      `Context keys: ${ctx ? Object.keys(ctx).join(", ") : "undefined"}`,
+  );
+
   const context = isAgentContext(experimental_context)
     ? experimental_context
     : undefined;

@@ -55,7 +55,17 @@ export interface SandboxOps {
     cwd?: string,
   ): Promise<ExecResult>;
   /** Send a prompt to the LLM agent. Returns the assistant's text response. */
-  prompt?(sessionId: string, userText: string, cwd: string): Promise<string>;
+  prompt?(sessionId: string, userText: string, cwd: string, messages?: Array<{ role: string; content: Array<Record<string, unknown>> }>): Promise<string>;
+  /** Set the active LLM model for a session. */
+  setActiveModel?(provider: string, config?: Record<string, unknown>): Promise<{ provider: string; model: string }>;
+  /** Get the currently active LLM model and provider. */
+  getActiveModel?(): Promise<{ provider: string; model: string }>;
+  /** Get the list of available LLM models from the gateway. */
+  getAvailableModels?(search?: string): Promise<
+    Array<{ id: string; name: string; provider: string }>
+  >;
+  /** Run an autonomous agent loop with tools. Returns the full conversation trace. */
+  runAgentLoop?(sessionId: string, messages: Array<Record<string, unknown>>, maxSteps?: number): Promise<{ messages: Array<Record<string, unknown>> }>;
   /** Set environment variables (secrets) on a session's sandbox. */
   setSecrets?(
     sessionId: string,
@@ -172,17 +182,33 @@ export const toolDefinitions: Record<
   },
   acp_providers_list: {
     name: "acp_providers_list",
-    description: "List available LLM providers.",
-    inputSchema: { type: "object", properties: {} },
-  },
-  acp_providers_set: {
-    name: "acp_providers_set",
-    description: "Set a provider configuration.",
+    description:
+      "List available LLM providers. Optional `search` filters models by substring. " +
+      "Returns only providers that have at least one matching model.",
     inputSchema: {
       type: "object",
       properties: {
-        provider: stringProp("Provider ID"),
-        config: { type: "object" },
+        search: stringProp(
+          "Optional substring to filter model IDs/names (case-insensitive)",
+        ),
+      },
+    },
+  },
+  acp_providers_set: {
+    name: "acp_providers_set",
+    description:
+      "Set the active LLM provider and model. " +
+      "Config accepts { model: \"provider/model\" } e.g. { model: \"openai/gpt-4o\" } or { model: \"anthropic/claude-sonnet-4\" }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: stringProp("Provider ID (e.g. openai, anthropic)"),
+        config: {
+          type: "object",
+          properties: {
+            model: stringProp("Model ID, e.g. openai/gpt-4o"),
+          },
+        },
       },
       required: ["provider"],
     },
@@ -292,17 +318,69 @@ export const toolDefinitions: Record<
   },
   acp_session_prompt: {
     name: "acp_session_prompt",
-    description: "Send a prompt to a session. Returns the assistant response.",
+    description:
+      "Send a prompt to a session. Returns the assistant response. " +
+      "Provide a single `message` (one turn) or `messages` (array for conversation history).",
     inputSchema: {
       type: "object",
       properties: {
         sessionId: stringProp("Session ID"),
         message: {
           type: "object",
-          properties: { role: stringProp("Role"), content: { type: "array" } },
+          properties: {
+            role: stringProp("Role (user/assistant)"),
+            content: { type: "array" },
+          },
+        },
+        messages: {
+          type: "array",
+          description:
+            "Conversation history: array of {role, content} objects. Use instead of `message` for multi-turn chats.",
+          items: {
+            type: "object",
+            properties: {
+              role: stringProp("Role (user/assistant)"),
+              content: { type: "array" },
+            },
+          },
         },
       },
-      required: ["sessionId", "message"],
+      required: ["sessionId"],
+    },
+  },
+  acp_session_agent_loop: {
+    name: "acp_session_agent_loop",
+    description:
+      "Run an autonomous agent loop with workspace tools (read_file, write_file, bash, glob). " +
+      "Provide `messages` array (chat history) or a single `task` string. " +
+      "The agent iterates up to `maxSteps` turns using tools to accomplish the task. " +
+      "Returns the full conversation trace including tool calls and results.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: stringProp("Session ID"),
+        task: stringProp(
+          "Shortcut: single task string (wraps as one user message). Use `messages` for full history.",
+        ),
+        messages: {
+          type: "array",
+          description:
+            "Conversation history: array of {role, content} objects. " +
+            "Use instead of `task` for multi-turn context.",
+          items: {
+            type: "object",
+            properties: {
+              role: stringProp("Role (user/assistant)"),
+              content: { type: "array" },
+            },
+          },
+        },
+        maxSteps: {
+          type: "number",
+          description: "Maximum agent loop iterations (default: 10)",
+        },
+      },
+      required: ["sessionId"],
     },
   },
   acp_session_cancel: {
@@ -773,17 +851,85 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
       return ok({});
     },
 
-    async acp_providers_list(): Promise<ToolContent[]> {
+    async acp_providers_list(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      let active: { provider: string; model: string } | undefined;
+      if (sandbox.getActiveModel) {
+        active = await sandbox.getActiveModel();
+      }
+
+      const searchParam = params.search as string | undefined;
+      const search = searchParam?.trim().toLowerCase();
+
+      // Dynamic model list from gateway, or fallback to hardcoded
+      let allModels: Array<{ id: string; name: string; provider: string }> = [];
+      if (sandbox.getAvailableModels) {
+        try {
+          allModels = await sandbox.getAvailableModels(search);
+        } catch {
+          // fall through to hardcoded
+        }
+      }
+
+      // Filter by search substring if provided
+      const models = search
+        ? allModels.filter(
+            (m) =>
+              m.id.toLowerCase().includes(search) ||
+              m.name.toLowerCase().includes(search),
+          )
+        : allModels;
+
+      // Derive unique providers from the (filtered) model list
+      const providerMap = new Map<
+        string,
+        { id: string; name: string; llmProtocol: string }
+      >();
+      for (const m of models) {
+        if (!providerMap.has(m.provider)) {
+          providerMap.set(m.provider, {
+            id: m.provider,
+            name:
+              m.provider.charAt(0).toUpperCase() + m.provider.slice(1),
+            llmProtocol:
+              m.provider === "anthropic" ? "anthropic" : "openai",
+          });
+        }
+      }
+
+      const providers =
+        providerMap.size > 0
+          ? Array.from(providerMap.values())
+          : [
+              { id: "openai", name: "OpenAI", llmProtocol: "openai" },
+              {
+                id: "anthropic",
+                name: "Anthropic",
+                llmProtocol: "anthropic",
+              },
+              { id: "deepseek", name: "DeepSeek", llmProtocol: "openai" },
+              { id: "google", name: "Google", llmProtocol: "google-genai" },
+            ];
+
       return ok({
-        providers: [
-          { id: "openai", name: "OpenAI", llmProtocol: "openai" },
-          { id: "anthropic", name: "Anthropic", llmProtocol: "anthropic" },
-        ],
+        providers,
+        ...(active
+          ? { activeProvider: active.provider, activeModel: active.model }
+          : {}),
+        ...(models.length > 0 ? { availableModels: models } : {}),
       });
     },
 
-    async acp_providers_set(): Promise<ToolContent[]> {
-      return ok({});
+    async acp_providers_set(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      if (!sandbox.setActiveModel) return err("Provider config not supported");
+      const result = await sandbox.setActiveModel(
+        params.provider as string,
+        params.config as Record<string, unknown> | undefined,
+      );
+      return ok(result);
     },
 
     async acp_providers_disable(): Promise<ToolContent[]> {
@@ -899,8 +1045,18 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
       const sessionId = params.sessionId as string;
       const record = await store.get(sessionId);
       if (!record) return err("Session not found");
-      const message = params.message as Record<string, unknown> | undefined;
-      const content = message?.content as
+
+      // Support both single `message` and `messages` array (history)
+      let messages = params.messages as
+        | Array<Record<string, unknown>>
+        | undefined;
+      if (!messages) {
+        const single = params.message as Record<string, unknown> | undefined;
+        if (single) messages = [single];
+      }
+
+      const lastMessage = messages?.[messages.length - 1];
+      const content = lastMessage?.content as
         | Array<Record<string, unknown>>
         | undefined;
       const text = (content?.[0]?.text as string) ?? "";
@@ -910,7 +1066,12 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
       // Use LLM agent if available, otherwise fall back to echo
       if (sandbox.prompt) {
         try {
-          assistantText = await sandbox.prompt(sessionId, text, record.cwd);
+          assistantText = await sandbox.prompt(
+            sessionId,
+            text,
+            record.cwd,
+            messages,
+          );
         } catch (error) {
           assistantText = `LLM error: ${error instanceof Error ? error.message : String(error)}`;
         }
@@ -933,6 +1094,39 @@ export function createHandlers(store: SessionStore, sandbox: SandboxOps) {
         ],
         stopReason: "end_turn",
       });
+    },
+
+    async acp_session_agent_loop(
+      params: Record<string, unknown>,
+    ): Promise<ToolContent[]> {
+      const sessionId = params.sessionId as string;
+      const record = await store.get(sessionId);
+      if (!record) return err("Session not found");
+      if (!sandbox.runAgentLoop)
+        return err("Agent loop not supported");
+
+      // Accept messages array (history) or single task string
+      let messages = params.messages as
+        | Array<Record<string, unknown>>
+        | undefined;
+      if (!messages || messages.length === 0) {
+        const task = params.task as string | undefined;
+        if (task) {
+          messages = [
+            { role: "user", content: [{ type: "text", text: task }] },
+          ];
+        }
+      }
+      if (!messages || messages.length === 0) {
+        return err("Provide `messages` array or `task` string");
+      }
+
+      const result = await sandbox.runAgentLoop(
+        sessionId,
+        messages,
+        (params.maxSteps as number | undefined) ?? 10,
+      );
+      return ok({ messages: result.messages });
     },
 
     async acp_session_cancel(): Promise<ToolContent[]> {

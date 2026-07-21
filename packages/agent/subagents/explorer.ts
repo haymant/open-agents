@@ -18,7 +18,7 @@ const EXPLORER_REMINDER = `## REMINDER
 - This is READ-ONLY - do NOT create, modify, or delete any files
 - Your final message MUST include both a **Summary** of what you searched AND the **Answer** to the task`;
 
-const EXPLORER_SYSTEM_PROMPT = `You are an explorer agent - a fast, read-only subagent specialized for exploring codebases.
+export const EXPLORER_SYSTEM_PROMPT = `You are an explorer agent - a fast, read-only subagent specialized for exploring codebases.
 
 ## CRITICAL RULES
 

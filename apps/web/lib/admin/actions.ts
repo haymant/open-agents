@@ -1,6 +1,7 @@
 "use server";
 
 import { eq } from "drizzle-orm";
+import { headers } from "next/headers";
 import { auth } from "@/lib/auth/config";
 import { db } from "@/lib/db/client";
 import { accounts, authSessions, githubInstallations } from "@/lib/db/schema";
@@ -118,6 +119,7 @@ export async function revokeAllGitHubTokens(): Promise<{
         try {
           const result = await auth.api.getAccessToken({
             body: { providerId: "github", userId: acct.userId },
+            headers: await headers(),
           });
           if (result?.accessToken) {
             const ok = await revokeGitHubToken(result.accessToken);
@@ -191,6 +193,7 @@ export async function revokeAllVercelTokens(): Promise<{
       vercelAccounts.map(async (acct) => {
         const result = await auth.api.getAccessToken({
           body: { providerId: "vercel", userId: acct.userId },
+          headers: await headers(),
         });
         if (result?.accessToken) {
           const ok = await revokeVercelToken(result.accessToken);

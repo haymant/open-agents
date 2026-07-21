@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
+import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
-import { tool, ToolLoopAgent, stepCountIs } from "ai";
-import { gateway } from "@open-agents/agent";
+import { ToolLoopAgent, stepCountIs } from "ai";
+import { gateway, openAgent } from "@open-agents/agent";
 import { connectSandbox, type SandboxState } from "@open-agents/sandbox";
 import {
   connectCoolify,
@@ -35,6 +36,7 @@ import {
   getCoolifyApplicationEnvs,
 } from "@/lib/sandbox/coolify-api";
 import { getCoolifyConnectorConfig } from "@/lib/sandbox/coolify-connector";
+import { createSandboxAgentTools } from "@/lib/sandbox/agent-tools";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -411,6 +413,9 @@ const sandboxStateCache = new Map<
 // Track dev server process IDs for each session (keyed by sessionId)
 const devServerProcesses = new Map<string, string>();
 
+// Active LLM model — defaults to deepseek/deepseek-v4-flash, changeable via acp_providers_set
+let activeModel = "deepseek/deepseek-v4-flash";
+
 function cacheSandboxState(
   sandboxName: string,
   state: Record<string, unknown>,
@@ -430,27 +435,53 @@ async function getSandboxForSession(
   const cached = sandboxStateCache.get(sandboxName);
   if (cached) return cached;
 
-  // Fallback: try DB lookup for existing sessions
+  // Fallback: try DB lookup
   try {
     const { db } = await import("@/lib/db/client");
     const { sessions } = await import("@/lib/db/schema");
+
+    // Coolify sandboxNames follow "coolify-<sessionId>" pattern
+    const sessionIdFromName = sandboxName.startsWith("coolify-")
+      ? sandboxName.slice(8)
+      : null;
+
+    let state: { sandboxName?: string; type?: string } | null | undefined;
+
+    if (sessionIdFromName) {
+      const row = await db
+        .select({ sandboxState: sessions.sandboxState })
+        .from(sessions)
+        .where(eq(sessions.id, sessionIdFromName))
+        .limit(1);
+      state = row[0]?.sandboxState as typeof state;
+    }
+
+    if (state?.type === "coolify") {
+      sandboxStateCache.set(sandboxName, {
+        type: "coolify",
+        state: state as CoolifyState,
+      });
+      return { type: "coolify", state: state as CoolifyState };
+    }
+
+    // Broader fallback: scan recent sessions for matching sandboxName
     const rows = await db
       .select({ sandboxState: sessions.sandboxState })
       .from(sessions)
       .limit(200);
 
     for (const row of rows) {
-      const state = row.sandboxState as {
+      const s = row.sandboxState as {
         sandboxName?: string;
         type?: string;
       } | null;
-      if (state?.sandboxName === sandboxName) {
-        if (state.type === "coolify") {
+      if (s?.sandboxName === sandboxName) {
+        if (s.type === "coolify") {
           sandboxStateCache.set(sandboxName, {
             type: "coolify",
-            state: state as CoolifyState,
+            state: s as CoolifyState,
           });
-          return { type: "coolify", state: state as CoolifyState };
+          return { type: "coolify", state: s as CoolifyState };
         }
         return { type: "vercel" };
       }
@@ -545,6 +576,10 @@ const sandboxOps: SandboxOps = {
     sessionId: string,
     userText: string,
     cwd: string,
+    messages?: Array<{
+      role: string;
+      content: Array<Record<string, unknown>>;
+    }>,
   ): Promise<string> {
     const record = await dbStore.get(sessionId);
     const sandboxName = record?.sandboxName;
@@ -564,91 +599,68 @@ const sandboxOps: SandboxOps = {
     }
 
     try {
-      const model = gateway("deepseek/deepseek-v4-flash");
+      const model = gateway(activeModel);
+
+      // Extract the user's request text to embed in instructions
+      const firstUserMsg = messages?.find((m) => m.role === "user");
+      const firstUserText =
+        (firstUserMsg?.content?.[0] as { text?: string } | undefined)?.text ??
+        userText ??
+        "";
 
       const agent = new ToolLoopAgent({
         model,
         instructions:
-          "You are an AI assistant with access to a workspace sandbox at /workspace. " +
+          "You are an AI assistant with access to a workspace sandbox at /workspace.\n\n" +
+          "## YOUR TASK\n" +
+          firstUserText +
+          "\n\n" +
+          "Build EXACTLY what is written above. Do not add features not requested. " +
           "Use tools to read, write, and find files. Always produce a final answer.",
         stopWhen: stepCountIs(10),
-        tools: {
-          write_file: tool({
-            description: "Write content to a file in the workspace.",
-            inputSchema: z.object({
-              filePath: z
-                .string()
-                .describe("File path, e.g. /workspace/README.md"),
-              content: z.string().describe("Content to write"),
-            }),
-            execute: async ({ filePath, content }) => {
-              const fp = filePath.startsWith("/")
-                ? filePath
-                : `${cwd}/${filePath}`;
-              const s = await connectSandboxForTools();
-              try {
-                await s.writeFile(fp, content, "utf-8");
-                return `wrote ${fp}`;
-              } finally {
-                await s.stop().catch(() => {});
-              }
-            },
-          }),
-          read_file: tool({
-            description: "Read a file from the workspace.",
-            inputSchema: z.object({
-              filePath: z
-                .string()
-                .describe("File path, e.g. /workspace/README.md"),
-            }),
-            execute: async ({ filePath }) => {
-              const fp = filePath.startsWith("/")
-                ? filePath
-                : `${cwd}/${filePath}`;
-              const s = await connectSandboxForTools();
-              try {
-                return await s.readFile(fp, "utf-8");
-              } finally {
-                await s.stop().catch(() => {});
-              }
-            },
-          }),
-          bash: tool({
-            description: "Run a shell command in the workspace.",
-            inputSchema: z.object({
-              command: z.string().describe("Shell command"),
-            }),
-            execute: async ({ command }) => {
-              const s = await connectSandboxForTools();
-              try {
-                const r = await s.exec(command, cwd, 120_000);
-                return `exit:${r.exitCode}\nstdout:${r.stdout}\nstderr:${r.stderr}`;
-              } finally {
-                await s.stop().catch(() => {});
-              }
-            },
-          }),
-          glob: tool({
-            description: "Find files matching a glob pattern.",
-            inputSchema: z.object({
-              pattern: z.string().describe("Glob pattern, e.g. **/*.md"),
-            }),
-            execute: async ({ pattern }) => {
-              const findCmd = `find ${cwd} -name "${pattern}" -type f 2>/dev/null || echo ""`;
-              const s = await connectSandboxForTools();
-              try {
-                const r = await s.exec(findCmd, cwd, 10_000);
-                return r.stdout.trim() || "(no matches)";
-              } finally {
-                await s.stop().catch(() => {});
-              }
-            },
-          }),
-        },
+        tools: createSandboxAgentTools(cwd, async () => {
+          const s = await connectSandboxForTools();
+          return { sandbox: s, stop: () => s.stop() };
+        }),
       });
 
+      // Build conversation history — only include messages with actual text.
+      // Messages can use `content` (MCP) or `parts` (WebAgentUIMessage) format.
+      const conversationMessages = messages
+        ? (() => {
+            const result: import("ai").ModelMessage[] = [];
+            for (const m of messages) {
+              const rawContent =
+                m.content ?? (m as Record<string, unknown>).parts;
+              let text = "";
+              if (typeof rawContent === "string") {
+                text = rawContent;
+              } else if (Array.isArray(rawContent)) {
+                for (const block of rawContent) {
+                  const b = block as Record<string, unknown>;
+                  if (
+                    b?.type === "text" &&
+                    typeof b.text === "string" &&
+                    b.text.trim()
+                  ) {
+                    text = b.text;
+                    break;
+                  }
+                }
+              }
+              if (text.trim().length > 0) {
+                result.push({
+                  role: m.role as "user" | "assistant",
+                  content: text,
+                });
+              }
+            }
+            return result;
+          })()
+        : [{ role: "user" as const, content: userText }];
+
       const result = await agent.stream({
-        messages: [{ role: "user" as const, content: userText }],
+        messages: conversationMessages,
       });
 
       let text = "";
@@ -1132,6 +1144,41 @@ const sandboxOps: SandboxOps = {
     devServerProcesses.delete(sessionId);
   },
 
+  async setActiveModel(
+    provider: string,
+    config?: Record<string, unknown>,
+  ): Promise<{ provider: string; model: string }> {
+    const modelId = (config?.model as string) ?? `${provider}/default`;
+    activeModel = modelId;
+    console.log(`[acpmcp] Active model set to: ${activeModel}`);
+    return { provider, model: activeModel };
+  },
+
+  async getActiveModel(): Promise<{ provider: string; model: string }> {
+    const parts = activeModel.split("/");
+    return { provider: parts[0] ?? "unknown", model: activeModel };
+  },
+
+  async getAvailableModels(
+    search?: string,
+  ): Promise<Array<{ id: string; name: string; provider: string }>> {
+    try {
+      const { fetchAvailableLanguageModelsWithContext } =
+        await import("@/lib/models-with-context");
+      const models = await fetchAvailableLanguageModelsWithContext();
+      return models.map((m) => {
+        const parts = m.id.split("/");
+        return {
+          id: m.id,
+          name: m.name ?? m.id,
+          provider: parts[0] ?? "unknown",
+        };
+      });
+    } catch {
+      return [];
+    }
+  },
+
   async getPreviewUrl(sessionId: string, port?: number): Promise<string> {
     const record = await getSessionById(sessionId);
     if (!record) throw new Error("Session not found");
@@ -1255,6 +1302,187 @@ const sandboxOps: SandboxOps = {
     }
 
     return { affected };
+  },
+
+  async runAgentLoop(
+    sessionId: string,
+    messages: Array<Record<string, unknown>>,
+    maxSteps?: number,
+  ): Promise<{ messages: Array<Record<string, unknown>> }> {
+    const record = await getSessionById(sessionId);
+    if (!record)
+      return {
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "Session not found" }],
+          },
+        ],
+      };
+
+    const sandboxState = record.sandboxState as CoolifyState | null;
+    if (
+      !sandboxState?.coolifyPreviewUrls?.health &&
+      !sandboxState?.coolifyApplicationUrl
+    ) {
+      return {
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "No sandbox state" }],
+          },
+        ],
+      };
+    }
+
+    const sandbox = await connectCoolify(sandboxState);
+    try {
+      // Build AgentSandboxContext matching what the chat UI passes.
+      // Embed the pre-connected Coolify sandbox in state._connectedSandbox
+      // so connectSandbox() (called by getSandbox() in tools) returns it directly.
+      const sandboxContext = {
+        state: {
+          type: "vercel" as const,
+          sandboxName: sandboxState.sandboxName ?? "",
+          _connectedSandbox: sandbox,
+        },
+        workingDirectory: "/workspace",
+        environmentDetails: "Coolify sandbox",
+      };
+
+      // Map incoming MCP messages to SDK simple format.
+      // Messages can use either `content` (standard MCP) or `parts`
+      // (WebAgentUIMessage format) for their content blocks.
+      // Only include messages with actual text content —
+      // tool-call/tool-result blocks produce empty text and would be
+      // rejected by Anthropic as "text content blocks must be non-empty".
+      const conversationMessages: Array<{ role: string; content: string }> = [];
+      for (const m of messages) {
+        const rawContent = m.content ?? (m as Record<string, unknown>).parts;
+        let text = "";
+        if (typeof rawContent === "string") {
+          text = rawContent;
+        } else if (Array.isArray(rawContent)) {
+          for (const block of rawContent) {
+            const b = block as Record<string, unknown>;
+            if (
+              b?.type === "text" &&
+              typeof b.text === "string" &&
+              b.text.trim()
+            ) {
+              text = b.text;
+              break;
+            }
+          }
+        }
+        if (text.trim().length > 0) {
+          conversationMessages.push({
+            role: (m.role as "user" | "assistant") ?? "user",
+            content: text,
+          });
+        }
+      }
+
+      const result = await (openAgent.stream as any)({
+        messages: conversationMessages,
+        options: {
+          sandbox: sandboxContext,
+        },
+        stopWhen: stepCountIs(maxSteps ?? 50),
+      });
+
+      // Collect full-stream messages including tool calls
+      const allMessages: Array<Record<string, unknown>> = [];
+      let currentRole = "";
+      let currentParts: Array<Record<string, unknown>> = [];
+
+      for await (const part of result.fullStream) {
+        const p = part as {
+          type: string;
+          textDelta?: string;
+          role?: string;
+          args?: unknown;
+          input?: unknown;
+          output?: unknown;
+          name?: string;
+          toolName?: string;
+          toolCallId?: string;
+          state?: string;
+          error?: unknown;
+        };
+
+        if (p.type === "text-delta") {
+          // Accumulate text into current assistant message
+          if (currentRole !== "assistant") {
+            if (currentRole && currentParts.length > 0) {
+              allMessages.push({ role: currentRole, content: currentParts });
+            }
+            currentRole = "assistant";
+            currentParts = [];
+          }
+          const last = currentParts[currentParts.length - 1];
+          if (last?.type === "text") {
+            last.text += p.textDelta ?? "";
+          } else {
+            currentParts.push({ type: "text", text: p.textDelta ?? "" });
+          }
+        } else if (p.type === "tool-call") {
+          // Flush previous text
+          if (currentRole && currentParts.length > 0) {
+            allMessages.push({ role: currentRole, content: currentParts });
+            currentParts = [];
+          }
+          currentRole = "assistant";
+          allMessages.push({
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                toolName: p.toolName ?? p.name ?? "unknown",
+                args: p.input ?? p.args,
+                toolCallId: p.toolCallId,
+              },
+            ],
+          });
+        } else if (p.type === "tool-result") {
+          allMessages.push({
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolName: p.toolName ?? p.name ?? "unknown",
+                toolCallId: p.toolCallId,
+                result: p.output ?? p.args,
+              },
+            ],
+          });
+        } else if (p.type === "error") {
+          allMessages.push({
+            role: "system",
+            content: [{ type: "text", text: `Error: ${p.error}` }],
+          });
+        }
+      }
+
+      // Flush remaining
+      if (currentRole && currentParts.length > 0) {
+        allMessages.push({ role: currentRole, content: currentParts });
+      }
+
+      return { messages: allMessages };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return {
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "text", text: `Agent error: ${msg}` }],
+          },
+        ],
+      };
+    } finally {
+      await sandbox.stop().catch(() => {});
+    }
   },
 };
 

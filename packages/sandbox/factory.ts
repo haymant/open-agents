@@ -56,11 +56,18 @@ export type SandboxConnectConfig = {
 
 /**
  * Connect to a sandbox based on the provided configuration.
+ * If the state has a `_connectedSandbox` property, returns it directly
+ * (used by acp-mcp to inject a pre-connected Coolify sandbox).
  */
 export async function connectSandbox(
   configOrState: SandboxConnectConfig | SandboxState,
   legacyOptions?: ConnectOptions,
 ): Promise<Sandbox> {
+  // Check for pre-connected sandbox (acp-mcp / Coolify path)
+  const raw = configOrState as Record<string, unknown>;
+  const preConnected = raw._connectedSandbox as Sandbox | undefined;
+  if (preConnected) return preConnected;
+
   const isNewApi =
     typeof configOrState === "object" &&
     "state" in configOrState &&

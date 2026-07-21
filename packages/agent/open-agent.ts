@@ -124,6 +124,13 @@ export const openAgent = new ToolLoopAgent({
       modelId: mainSelection.id,
     });
 
+    const hasConnected = !!(settings as Record<string, unknown>)
+      .experimental_context;
+    console.log(
+      `[openAgent.prepareCall] hasExpCtx=${hasConnected}` +
+        `, settings keys=${Object.keys(settings).join(", ")}`,
+    );
+
     return {
       ...settings,
       model: callModel,
@@ -137,6 +144,8 @@ export const openAgent = new ToolLoopAgent({
         skills,
         model: callModel,
         subagentModel,
+        // Preserve any extra context passed by callers (e.g. connectedSandbox for acp-mcp)
+        ...((settings.experimental_context ?? {}) as Record<string, unknown>),
       },
     };
   },

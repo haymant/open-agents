@@ -36,6 +36,38 @@ const mockSandbox: SandboxOps = {
     exitCode: 0,
   })),
   prompt: mock(async () => "hello world"),
+  setActiveModel: mock(
+    async (provider: string, config?: Record<string, unknown>) => ({
+      provider,
+      model: (config?.model as string) ?? `${provider}/default`,
+    }),
+  ),
+  getActiveModel: mock(async () => ({
+    provider: "deepseek",
+    model: "deepseek/deepseek-v4-flash",
+  })),
+  getAvailableModels: mock(
+    async (search?: string) => {
+      const all = [
+        { id: "openai/gpt-4o", name: "GPT-4o", provider: "openai" },
+        { id: "anthropic/claude-sonnet-4", name: "Claude Sonnet 4", provider: "anthropic" },
+        { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", provider: "deepseek" },
+      ];
+      if (search) {
+        const q = search.toLowerCase();
+        return all.filter(m => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q));
+      }
+      return all;
+    },
+  ),
+  runAgentLoop: mock(
+    async (sessionId: string, messages: Array<Record<string, unknown>>, maxSteps?: number) => ({
+      messages: [
+        ...messages,
+        { role: "assistant", content: [{ type: "text", text: `Agent completed in ${maxSteps ?? 10} steps` }] },
+      ],
+    }),
+  ),
 };
 
 function createTestHandlers() {
@@ -85,21 +117,26 @@ describe("acp_logout", () => {
 describe("acp_providers_list", () => {
   const h = createTestHandlers();
 
-  test("returns providers array", async () => {
+  test("returns providers array with active model", async () => {
     const res = await h.acp_providers_list({});
     const data = JSON.parse(res[0].text);
     expect(data.providers).toBeInstanceOf(Array);
-    expect(data.providers.length).toBeGreaterThanOrEqual(2);
+    expect(data.providers.length).toBeGreaterThanOrEqual(1);
     expect(data.providers[0]).toHaveProperty("id");
+    // Dynamic model list from gateway mock
+    expect(data.availableModels).toBeInstanceOf(Array);
+    expect(data.availableModels.length).toBeGreaterThanOrEqual(1);
   });
 });
 
 describe("acp_providers_set / disable", () => {
   const h = createTestHandlers();
 
-  test("set returns empty", async () => {
+  test("set returns provider info", async () => {
     const res = await h.acp_providers_set({ provider: "openai" });
-    expect(JSON.parse(res[0].text)).toEqual({});
+    const data = JSON.parse(res[0].text);
+    expect(data).toHaveProperty("provider");
+    expect(data).toHaveProperty("model");
   });
 
   test("disable returns empty", async () => {
@@ -520,5 +557,52 @@ describe("Protocol control", () => {
   test("cancel_request returns empty", async () => {
     const res = await h.acp_cancel_request({ requestId: "req-1" });
     expect(JSON.parse(res[0].text)).toEqual({});
+  });
+});
+
+describe("acp_session_agent_loop", () => {
+  const h = createTestHandlers();
+
+  test("returns full conversation for valid session", async () => {
+    const res = await h.acp_session_agent_loop({
+      sessionId: "test-session-1",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Create a React project" }] },
+      ],
+      maxSteps: 5,
+    });
+    const data = JSON.parse(res[0].text);
+    expect(data.messages).toBeInstanceOf(Array);
+    expect(data.messages.length).toBeGreaterThanOrEqual(2);
+    expect(data.messages[0].role).toBe("user");
+    expect(data.messages[0].content[0].text).toBe("Create a React project");
+  });
+
+  test("returns error for missing session", async () => {
+    const res = await h.acp_session_agent_loop({
+      sessionId: "nonexistent",
+      messages: [{ role: "user", content: [{ type: "text", text: "test" }] }],
+    });
+    const data = JSON.parse(res[0].text);
+    expect(data.error).toBe("Session not found");
+  });
+
+  test("returns error when no messages or task", async () => {
+    const res = await h.acp_session_agent_loop({
+      sessionId: "test-session-1",
+    });
+    const data = JSON.parse(res[0].text);
+    expect(data.error).toBe("Provide `messages` array or `task` string");
+  });
+
+  test("accepts task string as shortcut", async () => {
+    const res = await h.acp_session_agent_loop({
+      sessionId: "test-session-1",
+      task: "hello",
+    });
+    const data = JSON.parse(res[0].text);
+    expect(data.messages).toBeInstanceOf(Array);
+    expect(data.messages[0].role).toBe("user");
+    expect(data.messages[0].content[0].text).toBe("hello");
   });
 });

@@ -18,7 +18,7 @@ import {
   SUBAGENT_WORKING_DIR,
 } from "./constants";
 
-const EXECUTOR_SYSTEM_PROMPT = `You are an executor agent - a fire-and-forget subagent that completes specific, well-defined implementation tasks autonomously.
+export const EXECUTOR_SYSTEM_PROMPT = `You are an executor agent - a fire-and-forget subagent that completes specific, well-defined implementation tasks autonomously.
 
 Think of yourself as a productive engineer who cannot ask follow-up questions once started.
 

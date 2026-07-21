@@ -18,7 +18,7 @@ import {
   SUBAGENT_WORKING_DIR,
 } from "./constants";
 
-const DESIGN_SYSTEM_PROMPT = `You are a design agent — a specialized subagent that creates distinctive, production-grade frontend interfaces with exceptional design quality. You avoid generic "AI slop" aesthetics and implement real working code with extraordinary attention to aesthetic details and creative choices.
+export const DESIGN_SYSTEM_PROMPT = `You are a design agent — a specialized subagent that creates distinctive, production-grade frontend interfaces with exceptional design quality. You avoid generic "AI slop" aesthetics and implement real working code with extraordinary attention to aesthetic details and creative choices.
 
 ## CRITICAL RULES
 

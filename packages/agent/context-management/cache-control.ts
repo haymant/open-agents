@@ -113,8 +113,24 @@ export function addCacheControl<T extends ToolSet>({
 
   if (messages !== undefined) {
     if (messages.length === 0) return messages;
+
+    // Find the last message with non-empty content to mark for caching.
+    // Anthropic rejects cache_control on empty text blocks.
+    const lastNonEmptyIndex = messages
+      .map((m, i) => ({ content: m.content, index: i }))
+      .filter(
+        (m) =>
+          m.content &&
+          (typeof m.content === "string"
+            ? m.content.trim().length > 0
+            : Array.isArray(m.content)
+              ? m.content.length > 0
+              : true),
+      )
+      .pop()?.index;
+
     return messages.map((message, index) =>
-      index === messages.length - 1
+      index === lastNonEmptyIndex
         ? {
             ...message,
             providerOptions: {

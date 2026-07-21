@@ -125,11 +125,13 @@ EXAMPLES:
 
         // Get file metadata (mtime, size) along with paths.
         // GNU find -printf (Linux): outputs mtime/size/path directly.
-        // BSD find (macOS): pipe to xargs stat to avoid running find twice.
+        // BSD find (macOS): pipe to xargs stat -f.
+        // Linux stat -c: fallback for Linux containers.
         const findBase = findArgs.join(" ");
         const command = [
           `{ ${findBase} -printf '%T@\\t%s\\t%p\\n' 2>/dev/null`,
-          `|| ${findBase} -print0 | xargs -0 stat -f '%m%t%z%t%N' ; }`,
+          `|| ${findBase} -print0 2>/dev/null | xargs -0 stat -c '%Y\\t%s\\t%n' 2>/dev/null`,
+          `|| ${findBase} -print0 2>/dev/null | xargs -0 stat -f '%m%t%z%t%N' 2>/dev/null ; }`,
           `| sort -t$'\\t' -k1 -rn | head -n ${limit}`,
         ].join(" ");
 
